@@ -136,6 +136,44 @@ presentation → application → domain ← infrastructure
 - 풀네임 강제 — `workspaceId` ✓, `ws` ✗
 - 약어 금지: `comp` → `component`, `eval` → `evaluation`
 
+### 메서드 네이밍 — 동사 (+ 필요 시 전치사) + 시그니처
+메서드명은 `동사`를 기본으로 하고, **전치사는 의미를 더할 때만** 붙인다(무조건 X). 전치사를 쓸 땐 시그니처(파라미터)와 자연스럽게 읽혀 인자의 역할을 드러내도록 한다.
+
+| 전치사 | 의미 | 예 |
+|---|---|---|
+| `~By` | 조회·식별 키 | `findByUserId(userId)`, `deleteByScopeId(scopeId)` |
+| `~To` | 변환 대상 | `toResponse()`, `toEntity(model)` / `toModel(entity)` |
+| `~From` | 출처로부터 생성·역변환 (`~To`와 짝) | `fromEntity(entity)`, `NotificationSetting.fromSnapshot(snapshot)` |
+| `~With` | 동반 인자·협력 대상 | `mergeWith(other)`, `sendWith(channel)` |
+| `~In` | 범위·소속 | `findAllInScope(scopeId)`, `existsIn(workspaceId)` |
+| `~For` | 용도·대상 | `forMember(userId)`, `settingsForScope(scopeType, scopeId)` |
+
+- 단순 동작은 전치사 없이가 옳다 — `save(entity)`, `delete(id)`, `pullDomainEvents()`.
+- **시그니처가 이미 드러내는 토큰은 이름에서 뺀다** — 반환 타입·파라미터 타입과 중복 금지. `findSettingsByScope(scope: NotificationScope)` → `findByScope(scope)` (반환 타입이 `Settings`를, 그래도 남기려면 파라미터가 `Scope`를 표현). 단 `findSettingsBy`처럼 전치사를 매달지는 말 것(토큰을 통째로 제거).
+  - **예외**: Spring Data JpaRepository 파생 쿼리는 `findBy<Property>`를 프레임워크가 파싱하므로 기준을 명시 — `findByScopeTypeAndScopeId(...)`. 도메인 interface(Repository·Gateway) 메서드에서만 중복 제거 적용.
+- 안티패턴: ① 전치사 강제(`saveBy`, `deleteWith` 등 의미 없는 부착) ② 전치사 없이 모호한 이름 ③ `getXxx` 남용(조회 키가 있으면 `findBy~`).
+
+### 팩토리 메서드 네이밍 (`of~` vs `for~`)
+- `of~`: **인자 객체 자체로부터** 생성. 인자가 결과의 원본일 때. 예: `Result.of(entity)`, `List.of(elements)`
+- `for~`: **특정 대상·용도를 위해** 생성. 인자가 식별자(ID 등)거나 분기 케이스를 고정할 때. 예: `NotificationSettingReceiver.forMember(userId)` / `forRole(roleId)`
+- 안티패턴: `ofMember(userId)` — `of`인데 인자가 `Member` 객체가 아니라 `userId`(Long)라 의미 불일치. enum 값(`MEMBER`)을 메서드명에 박는 것도 지양. → `forMember(userId)`로.
+
+#### Java 정적 팩토리 네이밍 관례 (Effective Java Item 1)
+표준 정적 팩토리 네이밍을 기준으로 한다. 새 팩토리는 아래 관례 중 의미에 맞는 것을 고른다.
+
+| 패턴 | 의미 | 예 |
+|---|---|---|
+| `from` | 단일 파라미터 **타입 변환** | `Date.from(instant)`, `fromEntity(entity)` |
+| `of` | 여러 파라미터를 **집계**해 인스턴스 생성 | `EnumSet.of(JACK, QUEEN)`, `Result.of(entity)` |
+| `valueOf` | `from`/`of`의 더 장황한 버전 | `BigInteger.valueOf(Long.MAX_VALUE)` |
+| `getInstance` / `instance` | 파라미터로 기술된 인스턴스 반환(캐시·싱글톤 가능) | `Calendar.getInstance()` |
+| `newInstance` / `create` | 호출마다 **새 인스턴스 보장** | `Array.newInstance(type, len)` |
+| `getType` | 팩토리가 **다른 클래스**에 있을 때(Type=반환 타입) | `Files.getFileStore(path)` |
+| `newType` | `newInstance` + 다른 클래스 | `Files.newBufferedReader(path)` |
+| `type` | `getType`/`newType`의 간결형 | `Collections.list(...)`, `Paths.get(...)` |
+
+> 프로젝트 특화: 식별자·용도 기반 생성은 위 표의 `of`/`from` 대신 `for~`(예: `forMember(userId)`)를 우선한다 — 인자가 원본 객체가 아니라 식별자일 때.
+
 ## DTO 흐름
 
 ```

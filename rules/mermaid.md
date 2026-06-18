@@ -24,16 +24,20 @@ mmdc -i input.mmd -o output.png -w 4800 -b white -t default -s 4
 
 ```mermaid
 flowchart LR
-    subgraph API["API Layer"]
+    subgraph Presentation["Presentation"]
         Controller
     end
-    subgraph Domain["Domain Layer"]
-        Service --> OutputPort
+    subgraph Application["Application"]
+        UseCase
     end
-    subgraph Infra["Infra Layer"]
-        Repository -.->|implements| OutputPort
+    subgraph Domain["Domain"]
+        DomainService --> Repository
     end
-    Controller --> Service
+    subgraph Infra["Infrastructure"]
+        RepositoryImpl -.->|implements| Repository
+    end
+    Controller --> UseCase
+    UseCase --> DomainService
 ```
 
 ### Sequence Diagram
