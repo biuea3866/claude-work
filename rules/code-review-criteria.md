@@ -55,6 +55,8 @@ verdict: p0~p2 존재 → **REQUEST_CHANGES** / p3~p4만 → **COMMENT** / 없�
 | `!!` | `*.kt` |
 | Consumer 클래스 내 `Repository` 직접 주입 | `*.kt` |
 | `@Transactional` in Repository | `*.kt` |
+| `@Lob` (→ `@Type(JsonStringType::class)` + data class) | `*.kt` |
+| snapshot/payload를 `String`·`Map<String,Any>`로 보유 (→ data class 타입화) | `*.kt` |
 | FK·ENUM 컬럼·JSON 컬럼·BOOLEAN·DATETIME 정밀도 누락 ([db-schema-convention](./db-schema-convention.md)) | `*.sql` |
 
 ## p2 — 품질

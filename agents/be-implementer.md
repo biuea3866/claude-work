@@ -12,6 +12,8 @@ tools: Read, Grep, Glob, Bash, Write, Edit
 | ID | 패턴 | 대체 |
 |----|------|------|
 | no-jpa-query | `@Query(` | QueryDSL CustomImpl (비관적 락은 `@Lock + @Query` 허용) |
+| no-lob | `@Lob` | `@Type(JsonStringType::class)` + data class (라이브러리 없으면 import) |
+| no-stringified-json | snapshot/payload를 `String`·`Map<String,Any>`로 보유 | 의미 있는 data class로 타입화 (예: `EvaluationModuleRevision`) |
 | no-consumer-record | `ConsumerRecord<String, String>` | DTO 직접 매핑 + JsonDeserializer |
 | no-local-datetime | `LocalDateTime` | `ZonedDateTime` |
 | no-default-constructor-values | Entity `= ""` / `= 0` / `= ZonedDateTime.now()` | 호출부에서 명시적으로 전달 |

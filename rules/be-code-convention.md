@@ -217,8 +217,29 @@ fun process(id: Long): Result {
 
 ## JSON 컬럼
 
-- `@Type(JsonStringType::class)` + data class
+- **`@Lob` 금지 → `@Type(JsonStringType::class)` 사용.** `JsonStringType`(hypersistence-utils / hibernate-types)이 모듈에 없으면 빌드 의존성을 추가(import)한다.
 - `ObjectMapper` 직접 사용 금지
+- **JSON/스냅샷 데이터를 `String`으로 표현 금지 → data class로 타입화.** snapshot·config·payload처럼 구조 있는 데이터를 raw `String`(또는 `Map<String, Any>`)으로 들고 다니지 않는다. 의미를 드러내는 data class를 정의하고 `@Type(JsonStringType::class)`로 매핑한다.
+  - 예: 평가 모듈 스냅샷 → `String`이 아니라 `EvaluationModuleRevision` data class
+  - data class는 도메인 의미를 담은 필드로 구성하고, 컬럼은 그 타입으로 선언한다
+
+```kotlin
+// ❌ BAD — 스냅샷을 String 으로
+@Lob
+@Column(name = "module_snapshot")
+var moduleSnapshot: String
+
+// ✅ GOOD — data class 로 타입화 + JsonStringType 매핑
+@Type(JsonStringType::class)
+@Column(name = "module_snapshot", columnDefinition = "json")
+var moduleSnapshot: EvaluationModuleRevision
+
+data class EvaluationModuleRevision(
+    val moduleId: Long,
+    val version: Int,
+    val items: List<EvaluationItem>,
+)
+```
 
 ## Kafka Consumer
 
