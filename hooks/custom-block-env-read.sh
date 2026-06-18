@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/global-hook-guard.sh"
+project_owns_hook "$(basename "${BASH_SOURCE[0]}")" && exit 0
+
 input=$(cat)
 command=$(printf '%s' "$input" | python3 -c "import json,sys;print(json.load(sys.stdin).get('tool_input',{}).get('command',''))" 2>/dev/null || true)
 

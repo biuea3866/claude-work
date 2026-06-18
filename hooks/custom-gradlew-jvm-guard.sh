@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/global-hook-guard.sh"
+project_owns_hook "$(basename "${BASH_SOURCE[0]}")" && exit 0
+
 source "$(dirname "${BASH_SOURCE[0]}")/lib/jvm-detect.sh"
 
 input=$(cat)
