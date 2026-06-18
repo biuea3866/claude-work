@@ -11,6 +11,7 @@
 | [ticket-guide.md](./ticket-guide.md) | 티켓 md 구조, 사이즈 정의, 의존성 표기 | ticket-splitter |
 | [jira-sync.md](./jira-sync.md) | md ↔ Jira 접두사 컨벤션, 의존성 연결 규칙 (실행은 `jira-ticket` skill) | ticket-splitter |
 | [tdd-template.md](./tdd-template.md) | Technical Design Document 섹션 구조 | project-analyst, refactor-planner |
+| [tdd-review-criteria.md](./tdd-review-criteria.md) | TDD 검수 기준 (필수·조건부 섹션·설계 정합성) | prd-reviewer, /feature Step 1-D-R |
 | [document-sync.md](./document-sync.md) | TDD 동기화 원칙 및 주의사항 (실행은 `doc-sync` skill) | impl-doc-sync, pipeline-runner |
 | [be-code-convention.md](./be-code-convention.md) | Kotlin/Spring BE 컨벤션 (Hexagonal + Rich Domain) | be-implementer, be-senior, be-tech-lead, pr-reviewer |
 | [db-schema-convention.md](./db-schema-convention.md) | Flyway/MySQL DDL·하위 호환·파일 명명 (단일 기준) | db-schema-writer, code-reviewer, pr-reviewer |

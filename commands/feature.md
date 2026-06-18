@@ -79,7 +79,9 @@ PRD / 요구사항
     │ .claude/rules/tdd-template.md 따라 설계 문서 작성
     │ Background / Define Problem / Possible Solutions / Detail Design
     │ Component·Sequence·ERD 다이어그램 포함
-    │ 사용자 승인 후 Step 2
+    ▼
+[Step 1-D-R] prd-reviewer TDD 검수 → 피드백 루프
+    │ tdd-review-criteria 기준 누락·모순·조건부 섹션 검수 → 통과 시 사용자 승인 → Step 2
     ▼
 [Step 2] 티켓 라우팅 — 레이어별 서브에이전트 배정
     │
@@ -226,9 +228,21 @@ TPM 산출물을 기반으로 **기술 설계 문서**를 작성한다. 구현 �
 - 노드 15개 이하, 초과 시 `subgraph` 그룹핑
 - PNG 변환은 Confluence 동기화 시 (doc-sync 스킬)
 
+### Step 1-D-R — 자동 검수 (사용자 게이트 전, 필수)
+
+TDD 초안 작성 후 **사용자 승인 전에** `prd-reviewer`를 TDD 검수 모드로 호출한다.
+
+**에이전트**: `prd-reviewer`
+**입력**: `tdd.md` 경로 + [tdd-review-criteria](../rules/tdd-review-criteria.md)
+**검수**: 필수 섹션 누락 / 조건부 섹션(Observability·롤백·FE·Security) 필요성 / 설계 정합성 / 테스트 계획 커버리지
+
+**피드백 루프**:
+- PASS → 사용자 승인 게이트 진행
+- NEEDS_REVISION → TDD 보강 → Step 1-D-R 재검수 (최대 2회)
+
 ### 작성 후 사용자 승인 게이트
 
-TDD 초안 작성 후 **사용자에게 다음 항목 확인을 요청**한다:
+자동 검수(Step 1-D-R) 통과 후 **사용자에게 다음 항목 확인을 요청**한다:
 - 채택한 방안이 적절한가
 - AS-IS·TO-BE 비교가 정확한가
 - 누락된 클래스·다이어그램·테스트 시나리오가 없는가
