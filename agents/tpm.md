@@ -13,7 +13,7 @@ tools: Read, Grep, Glob, Bash, WebFetch, mcp__atlassian-doodlin__read_jira_issue
 ## Phase 1 — 분석
 
 1. 입력 유형 확인 — Jira 번호(`GRT-xxxx`)면 MCP로 조회, Confluence URL이면 `read_confluence_page`로 조회, PRD 텍스트·URL이면 직접 분석
-1-A. **페이지 내 링크 전수 수집·조회** — PRD/Confluence 본문에 포함된 모든 링크를 빠짐없이 따라간다. 유형별 분기: Figma 링크 → Figma MCP, 다른 Confluence 페이지(정책서·기획서·연관 TDD) → `read_confluence_page`, Jira 링크 → `read_jira_issue`, 그 외 외부 URL → `WebFetch`. 링크된 정책서·기획 문서의 제약·규칙도 요구사항의 일부로 함께 분석한다. (중복 URL 제거, 1-depth 재귀 — 링크 안의 링크까지 무한히 파고들지 않음)
+1-A. **페이지 내 링크 전수 수집·조회** — [context-link-collection](../rules/context-link-collection.md) 절차를 따른다. 수집한 정책서·기획 문서의 제약·규칙을 요구사항의 일부로 함께 분석해 영향 범위에 반영한다.
 2. 핵심 행동 흐름 추출 — 행위자 → 시스템 반응을 3–7단계로 정리
 2-A. **Figma 디자인 읽기 (URL 제공 시)** — `get_metadata`로 화면 구조, `get_design_context`로 컴포넌트·데이터·인터랙션, 필요 시 `get_screenshot`으로 화면 확인. 화면이 요구하는 데이터 항목·상태·액션을 BE 계약 후보로 추출
 2-B. **FE 코드베이스 역추적 (해당 FE 레포 제공/식별 시)** — FE의 API 호출부(`@api/`, `services/`, BFF 라우트)와 타입 정의를 읽어 화면이 기대하는 요청·응답 스키마를 파악. 기존 BE API와 대조해 신규/수정 필요 엔드포인트를 역산

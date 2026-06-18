@@ -13,6 +13,9 @@
 | [tdd-template.md](./tdd-template.md) | Technical Design Document 섹션 구조 | project-analyst, refactor-planner |
 | [document-sync.md](./document-sync.md) | TDD 동기화 원칙 및 주의사항 (실행은 `doc-sync` skill) | impl-doc-sync, pipeline-runner |
 | [be-code-convention.md](./be-code-convention.md) | Kotlin/Spring BE 컨벤션 (Hexagonal + Rich Domain) | be-implementer, be-senior, be-tech-lead, pr-reviewer |
+| [db-schema-convention.md](./db-schema-convention.md) | Flyway/MySQL DDL·하위 호환·파일 명명 (단일 기준) | db-schema-writer, code-reviewer, pr-reviewer |
+| [code-review-criteria.md](./code-review-criteria.md) | 코드 리뷰 등급(p0~p5)·체크 항목·출력 형식 (단일 기준) | code-reviewer, pr-reviewer |
+| [context-link-collection.md](./context-link-collection.md) | PRD·PR 본문 링크 전수 수집 절차·유형별 도구 | tpm, prd-reviewer, pr-reviewer |
 | [pr-guide.md](./pr-guide.md) | 브랜치 네이밍, PR 제목/본문 템플릿, Hook 강제 (실행은 `pr-create` skill) | be-implementer, fe-implementer, code-reviewer |
 
 ## 참조 방식

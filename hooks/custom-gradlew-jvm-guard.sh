@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/jvm-detect.sh"
+
 input=$(cat)
 command=$(printf '%s' "$input" | python3 -c "import json,sys;print(json.load(sys.stdin).get('tool_input',{}).get('command',''))" 2>/dev/null || true)
 
@@ -83,19 +85,12 @@ if [[ ! -f "$claudemd" ]]; then
   exit 0
 fi
 
-# 스택 핀 섹션 내부에서만 JVM 추출.
-# 전체 파일 first-match 는 비교 설명용으로 다른 모듈의 JVM 을 먼저 언급한 경우(예: doodlin-communication 의
-# greeting-communication JVM 21 비교) 오추출이 일어난다. 반드시 `## 스택 핀` ~ 다음 `## ` 사이만 본다.
-required=$(awk '/^## 스택 핀/{found=1; next} /^## /{if(found) exit} found' "$claudemd" \
-  | grep -oE 'JVM[[:space:]]*\**[[:space:]]*([0-9]+)' | head -1 | grep -oE '[0-9]+' || true)
+# 모듈 CLAUDE.md "## 스택 핀" 섹션의 요구 JVM (lib/jvm-detect.sh)
+required=$(jvm_required "$claudemd")
 [[ -z "$required" ]] && exit 0
 
-# 현재 java -version (JAVA_HOME 우선)
-if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
-  current=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1 | grep -oE '"[0-9]+' | tr -d '"' || echo "")
-else
-  current=$(java -version 2>&1 | head -1 | grep -oE '"[0-9]+' | tr -d '"' || echo "")
-fi
+# 현재 java -version (JAVA_HOME 우선, lib/jvm-detect.sh)
+current=$(jvm_current)
 
 if [[ -z "$current" ]]; then
   echo "⚠ Java 실행 파일을 찾을 수 없습니다 (PATH/JAVA_HOME 점검 필요)." >&2

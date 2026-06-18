@@ -142,23 +142,11 @@ Entity state 테스트와 UseCase interaction 테스트 **둘 다** 작성된 �
 
 ### UseCase 규칙
 
-```kotlin
-// ✅ GOOD — UseCase는 DomainService만 호출, execute() 10줄 이내
-class RequestRentalUseCase(
-    private val rentalDomainService: RentalDomainService,
-) {
-    @Transactional
-    fun execute(command: RequestRentalCommand): RequestRentalResult {
-        val rental = rentalDomainService.requestRental(command)
-        return RequestRentalResult.of(rental)
-    }
-}
+- UseCase는 **DomainService만 호출** — Repository/Gateway/DomainEventPublisher 직접 주입 금지
+- `execute()` 10줄 이내, `@Transactional`은 UseCase에 선언
+- 비즈니스 검증·상태 전이는 Entity/DomainService에 위임 (UseCase 내 `if + throw` 금지)
 
-// ❌ BAD — UseCase가 Repository 직접 참조
-class RequestRentalUseCase(
-    private val productRepository: ProductRepository, // 차단
-) { ... }
-```
+GOOD/BAD 예제: [be-code-convention](../rules/be-code-convention.md) "UseCase 규칙 (핵심)"
 
 ### Entity 규칙 (Rich Domain Model)
 
@@ -241,15 +229,7 @@ fun consume(record: ConsumerRecord<String, String>) {  // 차단
 
 ### 변수명 규칙
 
-풀네임 강제. 원래 단어를 100% 복원할 수 없으면 약어다.
-
-| 금지 | 올바른 예 |
-|------|-----------|
-| `ws` | `workspaceId` |
-| `comp` | `component` |
-| `msg` | `message` |
-| `req` / `res` | `request` / `response` |
-| `cfg` | `config` |
+풀네임 강제 — 원래 단어를 100% 복원할 수 없으면 약어다 (`ws`→`workspaceId`, `msg`→`message`, `req`/`res`→`request`/`response`). 상세 표: [be-code-convention](../rules/be-code-convention.md) "변수명".
 
 ```bash
 # GREEN 확인
@@ -335,19 +315,7 @@ gh pr create \
   --draft
 ```
 
-**브랜치 네이밍**: `<type>/<티켓접두사>-<번호>[-<short-description>]`
-
-| 작업 성격 | type |
-|----------|------|
-| 신규 기능 | `feat` |
-| 버그 수정 | `fix` |
-| 동작 변경 없는 코드 개선 | `refactor` |
-| 빌드·설정·의존성·문서 | `chore` |
-
-- 티켓 접두사는 `GRT`가 주로 쓰이지만 고정은 아닙니다. 프로젝트에 따라 다른 접두사도 허용.
-- `short-description` 은 선택 사항. 케밥케이스(소문자·하이픈) 사용.
-- 예: `feat/GRT-7100`, `feat/GRT-7100-add-rental-api`, `fix/ABC-42`
-
+**브랜치 네이밍·type·PR 제목·템플릿**: [pr-guide](../rules/pr-guide.md) 참조 — `<type>/<티켓접두사>-<번호>[-<short-description>]`, type은 feat/fix/refactor/chore.
 **base 브랜치**: `dev` (main 직접 push 금지)  
 **push 전**: `./gradlew test` BUILD SUCCESSFUL 필수 — 실패 시 push 불가
 

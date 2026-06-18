@@ -29,8 +29,14 @@
 
 - 도메인 개념은 영문을 유지합니다: Applicant, Opening, Workspace, Pipeline
 - 프로세스/동작은 자연스러운 한국어를 사용합니다: 다운그레이드, 배포, 롤백, 전환
-- 상태값은 한글로 표기합니다: 완료, 실패, 부분 실패, 진행 중, 대기
+- 상태값은 한글로 표기합니다: 완료, 실패, 부분 실패, 진행 중, 대기 (enum 이름은 영문 유지, 설명만 한글)
 - 기술 용어도 자연스럽게 한글화합니다:
-  - fire-and-forget → 결과 미추적
-  - 4-phase → 4단계 그룹 병렬
-  - blue-green → 블루그린 배포
+
+| 원문 | 한글 |
+|------|------|
+| fire-and-forget | 결과 미추적 |
+| 4-phase | 4단계 그룹 병렬 |
+| blue-green | 블루그린 배포 |
+| shadow traffic | 섀도 트래픽 |
+| dual write | 이중 기록 |
+| strangler fig | 점진적 대체 |

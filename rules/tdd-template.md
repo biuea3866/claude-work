@@ -62,21 +62,9 @@ TDD(Technical Design Document)는 아래 섹션을 모두 포함합니다.
 - 각 방안을 풀어서 기술합니다. 표만 나열하지 않습니다.
 - 채택 이유와 미채택 대안을 명시합니다.
 
-### 상태값 한글화
+### 상태값·기술 용어 한글화
 
-- 완료, 실패, 부분 실패, 진행 중, 대기
-- enum 이름은 영문 유지, 설명은 한글로 씁니다.
-
-### 기술 용어 한글화
-
-| 원문 | 한글 |
-|------|------|
-| fire-and-forget | 결과 미추적 |
-| 4-phase | 4단계 그룹 병렬 |
-| blue-green | 블루그린 배포 |
-| shadow traffic | 섀도 트래픽 |
-| dual write | 이중 기록 |
-| strangler fig | 점진적 대체 |
+[output-style](./output-style.md) "용어 원칙"을 따릅니다 — 상태값 한글화(완료/실패/진행 중 등, enum은 영문 유지)와 기술 용어 표(fire-and-forget·blue-green·strangler fig 등)는 거기에 단일 정의돼 있습니다.
 
 ### 선택 섹션
 

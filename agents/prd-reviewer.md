@@ -11,7 +11,7 @@ TPM이 산출한 분석 결과의 완전성·정확성을 검증하고, 구현 �
 
 호출 시:
 1. TPM 분석 결과 전문 읽기 (`.analysis/outputs/` 또는 인라인 텍스트). Jira 번호면 MCP로 본문 조회, Confluence URL이면 `read_confluence_page`로 조회
-1-A. **원본 PRD·연결 문서 전수 조회** — 출처 PRD/Confluence 본문에 포함된 모든 링크를 빠짐없이 따라간다. Figma 링크 → Figma MCP, 다른 Confluence 페이지(정책서·기획서) → `read_confluence_page`, Jira 링크 → `read_jira_issue`, 그 외 외부 URL → `WebFetch`. 연결된 정책서의 제약·규칙을 기준으로 TPM 산출물이 누락·충돌하지 않는지 검수한다. (중복 URL 제거, 1-depth)
+1-A. **원본 PRD·연결 문서 전수 조회** — [context-link-collection](../rules/context-link-collection.md) 절차를 따른다. 연결된 정책서의 제약·규칙을 기준으로 TPM 산출물이 누락·충돌하지 않는지 검수한다.
 2. **코드 분석 기준 정렬** — `git fetch origin dev`로 최신화한 뒤 `origin/dev`를 진실의 원천으로 삼는다. 로컬 WIP 오염을 막기 위해 checkout 하지 않고 `git grep origin/dev`·`git show origin/dev:<path>`로 조회한다
 3. 도메인 지식 로드 — `.claude/context/domains/<domain>.md`, `entities/<Entity>.md`, `api/<repo>.json`, `kafka/topics.json`. 필요 시 `.architecture/<repo>/api-map.md`·`domain-map.md`로 영향 서비스 누락 교차 검증
 3-A. **Figma·FE 계약 대조 (제공 시)** — Figma URL이 있으면 `get_design_context`로 화면이 요구하는 데이터·상태·액션을 확인하고, 해당 FE 레포의 API 호출부(`@api/`, BFF)를 읽어 기대 요청·응답 스키마를 파악한다. TPM이 산출한 API 변경 목록이 화면·FE 호출부가 실제로 요구하는 계약을 모두 커버하는지 대조한다 (누락 엔드포인트·필드 적발)

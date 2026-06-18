@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/jvm-detect.sh"
+
 # Claude Code 가 SessionStart hook 에 stdin JSON 을 보낸다. cwd 필드 포함.
 # 직접 호출 시 stdin 이 비어 있을 수 있으므로 양쪽 fallback 유지.
 input=$(cat 2>/dev/null || true)
@@ -41,19 +43,13 @@ if [[ "$CWD" == "$ROOT" ]]; then
   echo "module: (root) — Gradle 빌드를 직접 실행하지 마세요. 모듈 디렉토리로 cd 후 ./gradlew를 사용하세요."
 elif [[ -f "$ROOT/$module/CLAUDE.md" ]]; then
   echo "module: $module"
-  # 2) 모듈 CLAUDE.md의 "## 스택 핀" 섹션 내부에서만 JVM 버전 추출.
-  #    전체 파일 first-match 는 비교 설명용으로 다른 모듈 JVM 을 먼저 언급한 경우(예: doodlin-communication 본문이
-  #    greeting-communication 의 JVM 21 을 먼저 인용)에 오추출된다. custom-gradlew-jvm-guard.sh 와 동일 규칙.
-  jvm=$(awk '/^## 스택 핀/{found=1; next} /^## /{if(found) exit} found' "$ROOT/$module/CLAUDE.md" \
-    | grep -oE 'JVM[[:space:]]*\**[[:space:]]*([0-9]+)' | head -1 | grep -oE '[0-9]+' || true)
+  # 2) 모듈 CLAUDE.md "## 스택 핀" 섹션의 JVM 추출 (lib/jvm-detect.sh — gradle guard 와 동일 규칙)
+  jvm=$(jvm_required "$ROOT/$module/CLAUDE.md")
   if [[ -n "${jvm:-}" ]]; then
     echo "required JVM: $jvm  (export JAVA_HOME=\$(/usr/libexec/java_home -v $jvm))"
-    # JVM 판정은 custom-gradlew-jvm-guard.sh 와 동일한 우선순위 — $JAVA_HOME 우선, fallback PATH
-    if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
-      current_jvm=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1 | grep -oE '"[0-9]+' | tr -d '"' || echo "?")
-    else
-      current_jvm=$(java -version 2>&1 | head -1 | grep -oE '"[0-9]+' | tr -d '"' || echo "?")
-    fi
+    # JVM 판정은 gradle guard 와 동일 우선순위 — $JAVA_HOME 우선, fallback PATH
+    current_jvm=$(jvm_current)
+    [[ -z "$current_jvm" ]] && current_jvm="?"
     if [[ "$current_jvm" == "?" || -z "$current_jvm" ]]; then
       echo "ℹ 현재 JVM 추출 실패 — java/JAVA_HOME 미설정 가능. \`export JAVA_HOME=\$(/usr/libexec/java_home -v $jvm)\` 후 재시도."
     elif [[ "$current_jvm" != "$jvm" ]]; then
