@@ -141,15 +141,16 @@ presentation → application → domain ← infrastructure
 
 | 전치사 | 의미 | 예 |
 |---|---|---|
-| `~By` | 조회·식별 키 | `findByUserId(userId)`, `deleteByScopeId(scopeId)` |
+| `~By` | 조회·식별 키 (키 이름은 생략, 파라미터가 표현) | `findBy(userId)`, `deleteBy(scopeId)` |
 | `~To` | 변환 대상 | `toResponse()`, `toEntity(model)` / `toModel(entity)` |
 | `~From` | 출처로부터 생성·역변환 (`~To`와 짝) | `fromEntity(entity)`, `NotificationSetting.fromSnapshot(snapshot)` |
 | `~With` | 동반 인자·협력 대상 | `mergeWith(other)`, `sendWith(channel)` |
-| `~In` | 범위·소속 | `findAllInScope(scopeId)`, `existsIn(workspaceId)` |
-| `~For` | 용도·대상 | `forMember(userId)`, `settingsForScope(scopeType, scopeId)` |
+| `~In` | 범위·소속 | `findAllIn(scopeId)`, `existsIn(workspaceId)` |
+| `~For` | 용도·대상 | `forMember(userId)`, `settingsFor(scopeType, scopeId)` |
 
 - 단순 동작은 전치사 없이가 옳다 — `save(entity)`, `delete(id)`, `pullDomainEvents()`.
-- **시그니처가 이미 드러내는 토큰은 이름에서 뺀다** — 반환 타입·파라미터 타입과 중복 금지. `findSettingsByScope(scope: NotificationScope)` → `findByScope(scope)` (반환 타입이 `Settings`를, 그래도 남기려면 파라미터가 `Scope`를 표현). 단 `findSettingsBy`처럼 전치사를 매달지는 말 것(토큰을 통째로 제거).
+- **전치사 뒤의 키·범위 이름은 생략한다 — 전치사(`By`/`In`/`For` 등)는 남기되, 그 뒤 토큰은 빼고 시그니처(파라미터)가 표현하게 한다.** 예: `findByScope(scopeType, scopeId, type)` → `findBy(scopeType, scopeId, type)`, `findAllInScope(scopeId)` → `findAllIn(scopeId)`, `settingsForScope(scopeType, scopeId)` → `settingsFor(scopeType, scopeId)`.
+  - **단 파라미터 타입만으로 구분이 안 되면 접미사를 유지한다** — 예: `forMember(userId: Long)` vs `forRole(roleId: Long)` (둘 다 `Long`이라 시그니처가 구분 못 함). 멀티엔티티 포트의 엔티티 noun(`findReceiversBy`/`findReservationsBy`)도 구분자로 유지.
   - **예외**: Spring Data JpaRepository 파생 쿼리는 `findBy<Property>`를 프레임워크가 파싱하므로 기준을 명시 — `findByScopeTypeAndScopeId(...)`. 도메인 interface(Repository·Gateway) 메서드에서만 중복 제거 적용.
 - 안티패턴: ① 전치사 강제(`saveBy`, `deleteWith` 등 의미 없는 부착) ② 전치사 없이 모호한 이름 ③ `getXxx` 남용(조회 키가 있으면 `findBy~`).
 
@@ -301,6 +302,8 @@ class PlanChangedEventWorker(
 ```
 
 ## 필수 테스트 레이어
+
+> **테스트 프레임워크는 무조건 Kotest를 사용한다.** 신규 테스트 코드에 JUnit(`@Test`/`SpringRunner`/`org.junit.*`) 사용 금지 — 전 레이어(domain/application/infrastructure/presentation/scenario)에서 Kotest(BehaviorSpec/DescribeSpec/FunSpec)로 작성한다.
 
 모두 존재해야 PR 승인 가능. TDD(Test-Driven Development) 사이클(RED → GREEN → detekt)을 따른다.
 
