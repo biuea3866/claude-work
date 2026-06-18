@@ -1,0 +1,15 @@
+# 기본: 모든 것을 무시한다
+/*
+
+# 버전관리 대상만 화이트리스트로 허용
+!/.gitignore
+!/agents/
+!/hooks/
+!/mcp/
+!/rules/
+!/skills/
+
+# ── OS / Python (허용 디렉토리 내부에서도 무시) ──
+.DS_Store
+__pycache__/
+*.pyc

@@ -1,0 +1,29 @@
+{
+  "_service": "Grafana",
+  "_status": "needs-setup",
+  "_note": "공식 Grafana MCP Go 바이너리 v0.14.0. ~/bin/mcp-grafana 에 설치됨.",
+  "_package": "github.com/grafana/mcp-grafana (Go binary)",
+  "_install": "go install github.com/grafana/mcp-grafana@latest",
+  "_alternative": "Bash Loki API 기반 접근은 dev-errors skill 참조 (.claude/skills/dev-errors/SKILL.md)",
+  "mcpServers": {
+    "grafana": {
+      "command": "~/bin/mcp-grafana",
+      "env": {
+        "GRAFANA_URL": "https://monitoring.dev.greetinghr.com",
+        "GRAFANA_API_KEY": "${GRAFANA_TOKEN}"
+      }
+    }
+  },
+  "_envVars": {
+    "GRAFANA_TOKEN": "~/.zshrc에 이미 설정됨"
+  },
+  "_provides": [
+    "search_dashboards",
+    "get_dashboard",
+    "query_datasource",
+    "list_datasources",
+    "search_alerts",
+    "query_loki_logs",
+    "query_prometheus_metrics"
+  ]
+}

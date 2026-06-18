@@ -1,0 +1,35 @@
+{
+  "_service": "Datadog",
+  "_status": "needs-setup",
+  "_note": "커뮤니티 패키지(@kud/mcp-datadog). DD_API_KEY, DD_APP_KEY는 ~/.zshrc에 이미 존재.",
+  "_package": "@kud/mcp-datadog",
+  "_install": "npm install -g @kud/mcp-datadog",
+  "_alternative": "Bash curl 기반 접근은 prod-errors skill 참조 (.claude/skills/prod-errors/SKILL.md)",
+
+  "mcpServers": {
+    "datadog": {
+      "command": "npx",
+      "args": ["-y", "@kud/mcp-datadog"],
+      "env": {
+        "DATADOG_API_KEY": "${DD_API_KEY}",
+        "DATADOG_APP_KEY": "${DD_APP_KEY}",
+        "DATADOG_SITE": "datadoghq.com"
+      }
+    }
+  },
+
+  "_envVars": {
+    "DD_API_KEY": "~/.zshrc에 이미 설정됨",
+    "DD_APP_KEY": "~/.zshrc에 이미 설정됨"
+  },
+
+  "_provides": [
+    "query_metrics",
+    "search_logs",
+    "list_monitors",
+    "get_monitor",
+    "list_dashboards",
+    "get_events",
+    "search_traces"
+  ]
+}
