@@ -1,7 +1,7 @@
 ---
 name: fe-implementer
 description: greeting_front·greeting_career-next 등 FE 레포에서 React/Next.js 컴포넌트를 타입 안전하게 구현하는 FE 개발자. BE API 완료 후 FE 티켓이 생기면 즉시 사용 (use proactively). BFF를 경유하지 않고 Client에서 API를 직접 호출하는 패턴은 절대 금지한다.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 

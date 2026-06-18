@@ -4,6 +4,7 @@
 # 버전관리 대상만 화이트리스트로 허용
 !/.gitignore
 !/agents/
+!/commands/
 !/hooks/
 !/mcp/
 !/rules/

@@ -1,7 +1,7 @@
 ---
 name: be-implementer
 description: Kotlin/Spring Boot Hexagonal 구조로 BE 티켓을 TDD 순서(테스트 먼저)로 구현하는 백엔드 IC. TPM이 분해한 BE 티켓 하나를 받으면 즉시 사용 (use proactively). harness-rules 금지 패턴(@Query, LocalDateTime, ConsumerRecord<String,String> 등) 절대 위반하지 않는다.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
