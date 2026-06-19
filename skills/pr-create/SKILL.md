@@ -5,7 +5,7 @@ model: sonnet
 user-invocable: true
 ---
 
-대상: $ARGUMENTS (GRT-XXXX 티켓 번호 — Jira 티켓이 없으면 `NO-JIRA`)
+대상: $ARGUMENTS (PROJ-XXXX 티켓 번호 — Jira 티켓이 없으면 `NO-JIRA`)
 
 현재 브랜치: !`git branch --show-current`
 현재 날짜: !`date +%Y-%m-%d`
@@ -44,7 +44,7 @@ git push -u origin "$(git branch --show-current)"
 
 ```bash
 gh pr create \
-  --title "[GRT-XXXX] - {type} : {제목}" \
+  --title "[PROJ-XXXX] - {type} : {제목}" \
   --body "$(cat .github/pull_request_template.md)" \
   --base dev \
   --draft
@@ -56,7 +56,7 @@ gh pr create \
 ### 개요
 <!-- Jira 티켓 링크 포함 -->
 
-- Jira: https://doodlin.atlassian.net/browse/GRT-XXXX
+- Jira: {ATLASSIAN_BASE_URL}/browse/PROJ-XXXX
 - (한 줄 설명)
 
 ### 작업 내용
@@ -109,14 +109,14 @@ PR 머지 후 Jira 상태를 배포 대기로 전이한다.
 
 ```bash
 # transition ID 조회
-curl -s "https://doodlin.atlassian.net/rest/api/3/issue/GRT-XXXX/transitions" \
-  -u "biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}" \
+curl -s "{ATLASSIAN_BASE_URL}/rest/api/3/issue/PROJ-XXXX/transitions" \
+  -u "${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}" \
   | python3 -c "import json,sys; [print(t['id'], t['name']) for t in json.load(sys.stdin)['transitions']]"
 
 # 전이 실행
 curl -s -X POST \
-  "https://doodlin.atlassian.net/rest/api/3/issue/GRT-XXXX/transitions" \
-  -u "biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}" \
+  "{ATLASSIAN_BASE_URL}/rest/api/3/issue/PROJ-XXXX/transitions" \
+  -u "${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"transition": {"id": "<ID>"}}'
 
@@ -130,6 +130,6 @@ git branch -d <브랜치명>
 
 ```
 PR 생성 완료
-URL: https://github.com/doodlincorp/greeting/pull/XXX
+URL: https://github.com/<owner>/<repo>/pull/XXX
 상태: Draft (리뷰 준비 후 gh pr ready <번호>)
 ```

@@ -9,7 +9,7 @@ user-invocable: true
 
 환경: `env:dev` 고정 — 프로덕션 에러 조회는 `/prod-errors` 사용
 
-URL: `https://monitoring.dev.greetinghr.com`
+URL: `${MONITORING_URL}` (예: `https://monitoring.dev.example.com`) — `~/.zshrc`에 세팅 필요.
 키: `$GRAFANA_TOKEN` — `~/.zshrc`에 세팅 필요. **값 출력 금지**.
 없으면 즉시 중단하고 사용자에게 알린다.
 
@@ -23,9 +23,9 @@ URL: `https://monitoring.dev.greetinghr.com`
 
 ```bash
 # URL 인코딩된 query 파라미터로 전달
-QUERY='{namespace="greeting-dev",app="<svc>"} |= "error" |= "<keyword>" | logfmt | line_format "{{.ts}} {{.level}} {{.msg}}"'
+QUERY='{namespace="<project>-dev",app="<svc>"} |= "error" |= "<keyword>" | logfmt | line_format "{{.ts}} {{.level}} {{.msg}}"'
 
-curl -sS -G "https://monitoring.dev.greetinghr.com/loki/api/v1/query_range" \
+curl -sS -G "${MONITORING_URL}/loki/api/v1/query_range" \
   -H "Authorization: Bearer ${GRAFANA_TOKEN}" \
   --data-urlencode "query=${QUERY}" \
   --data-urlencode "start=$(date -v-1H +%s)000000000" \
@@ -41,7 +41,7 @@ curl -sS -G "https://monitoring.dev.greetinghr.com/loki/api/v1/query_range" \
 에러 메시지 발견 시 전후 10줄 컨텍스트:
 ```bash
 # 같은 pod에서 같은 timestamp 근처 로그
-{namespace="greeting-dev",app="<svc>",pod="<pod>"} |= "<error_class>"
+{namespace="<project>-dev",app="<svc>",pod="<pod>"} |= "<error_class>"
 ```
 
 ### 3. 출력 형식
@@ -64,7 +64,7 @@ curl -sS -G "https://monitoring.dev.greetinghr.com/loki/api/v1/query_range" \
 ### 코드 위치
 - <repo>/<path>:<line>
 
-Grafana 링크: https://monitoring.dev.greetinghr.com/explore?datasource=loki&query=...
+Grafana 링크: ${MONITORING_URL}/explore?datasource=loki&query=...
 ```
 
 raw JSON 전체 덤프 금지. `level=error` 이상만 추출.

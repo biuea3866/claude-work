@@ -286,7 +286,7 @@ grep -rnE "\b[a-z][a-zA-Z0-9]*\.(status|state)\s*(==|!=)" --include="*.kt" <모�
 
 여러 be-implementer를 **병렬 팀으로 동시에** 돌릴 때는 다음 전제를 반드시 지킨다. 위반하면 작업이 유실된다.
 
-- **격리 필수**: 각 에이전트는 자기 git worktree에서 작업한다 (Agent 도구 `isolation: "worktree"`, 또는 수동 `git worktree add ../wt-GRT-xxxx -b feat/GRT-xxxx <base>`). 격리 안에서는 worktree마다 인덱스가 독립이라 Step 7의 `git checkout -b`가 안전하다.
+- **격리 필수**: 각 에이전트는 자기 git worktree에서 작업한다 (Agent 도구 `isolation: "worktree"`, 또는 수동 `git worktree add ../wt-PROJ-xxxx -b feat/PROJ-xxxx <base>`). 격리 안에서는 worktree마다 인덱스가 독립이라 Step 7의 `git checkout -b`가 안전하다.
 - **대상 git 레포에서 세션 시작**: worktree 격리는 *세션 루트 레포* 기준으로 동작한다. 비-git 디렉토리(설정/프레임워크 레포 등)에서 띄우면 `Cannot create agent worktree: not in a git repository`로 격리가 거부된다. (이 경우 settings.json에 `WorktreeCreate`/`WorktreeRemove` 훅을 구성하면 우회 가능.)
 - **격리 없는 병렬 금지**: 한 작업 트리를 공유한 채 여러 에이전트가 동시에 `git checkout -b` / commit 하면 `.git/index.lock` 충돌이 나고, 마지막 한 브랜치만 남고 나머지 작업이 사라진다. (단일 에이전트 단독 실행이면 격리 없이 Step 7을 그대로 써도 된다.)
 
@@ -295,7 +295,7 @@ grep -rnE "\b[a-z][a-zA-Z0-9]*\.(status|state)\s*(==|!=)" --include="*.kt" <모�
 ```
 [대상 레포(표준 git)에서 오케스트레이터 세션 시작]
    └─ be-implementer × N  (각각 isolation: "worktree")
-        └─ 각 worktree에서 git checkout -b feat/GRT-xxxx → 구현 → 커밋 → PR
+        └─ 각 worktree에서 git checkout -b feat/PROJ-xxxx → 구현 → 커밋 → PR
 ```
 
 ---
@@ -303,15 +303,15 @@ grep -rnE "\b[a-z][a-zA-Z0-9]*\.(status|state)\s*(==|!=)" --include="*.kt" <모�
 ## Step 7 — 커밋 & PR
 
 ```bash
-git checkout -b feat/GRT-{번호}                # 짧은 설명 없이
+git checkout -b feat/PROJ-{번호}                # 짧은 설명 없이
 # 또는
-git checkout -b feat/GRT-{번호}-{short-description}   # 짧은 설명 포함
+git checkout -b feat/PROJ-{번호}-{short-description}   # 짧은 설명 포함
 
-git commit -m "[GRT-XXXX] - feat: 제목"
+git commit -m "[PROJ-XXXX] - feat: 제목"
 
 # PR 생성 (레포 .github/pull_request_template.md 존재 시 해당 양식 사용)
 gh pr create \
-  --title "[GRT-XXXX] - feat: 제목" \
+  --title "[PROJ-XXXX] - feat: 제목" \
   --body "$(cat .github/pull_request_template.md)" \
   --base dev \
   --draft

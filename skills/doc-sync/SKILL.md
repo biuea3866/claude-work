@@ -51,7 +51,7 @@ mmdc -i diagram.mmd -o diagram.png -w 4800 -b white -t default -s 4
 
 ## Step 3 — Confluence 페이지 업데이트
 
-`mcp__atlassian-doodlin__update_confluence_page`를 사용한다.
+`mcp__claude_ai_Atlassian__updateConfluencePage`를 사용한다.
 
 주의: 전체 교체 시 Confluence에서 직접 수정한 내용이 유실된다. Confluence에서 직접 수정한 내용이 있다면 md에 먼저 반영한 후 동기화한다.
 
@@ -69,8 +69,8 @@ mmdc -i diagram.mmd -o diagram.png -w 4800 -b white -t default -s 4
 
 ```bash
 curl -s -X PUT \
-  "https://doodlin.atlassian.net/rest/api/3/issue/GRT-XXXX" \
-  -u "biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}" \
+  "{ATLASSIAN_BASE_URL}/rest/api/3/issue/PROJ-XXXX" \
+  -u "${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"fields": {"description": { ...ADF... }}}'
 ```
@@ -82,6 +82,6 @@ curl -s -X PUT \
 ```
 동기화 완료
 Confluence: <페이지 링크>
-티켓 업데이트: GRT-XXXX, GRT-YYYY
+티켓 업데이트: PROJ-XXXX, PROJ-YYYY
 Jira 반영: ✅
 ```

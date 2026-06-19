@@ -1,6 +1,6 @@
 # DB 스키마 컨벤션 (Flyway / MySQL)
 
-greeting-db-schema 레포의 Flyway 마이그레이션 작성 규칙. `db-schema-writer`가 작성 기준으로, `code-reviewer`/`pr-reviewer`가 SQL 검수 기준으로 공통 참조한다 (단일 기준).
+`{db-schema-repo}` 레포의 Flyway 마이그레이션 작성 규칙. `db-schema-writer`가 작성 기준으로, `code-reviewer`/`pr-reviewer`가 SQL 검수 기준으로 공통 참조한다 (단일 기준).
 
 ## DDL 작성 규칙
 

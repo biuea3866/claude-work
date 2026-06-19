@@ -19,8 +19,8 @@ PRD·Confluence·Jira·PR 본문에 걸린 링크를 빠짐없이 따라가 컨�
 
 | 링크 종류 | 패턴 | 도구 |
 |---|---|---|
-| Jira | `atlassian.net/browse/GRT-XXXX` | `read_jira_issue` (본문·하위 작업·AC, 여러 개면 모두) |
-| Confluence | `atlassian.net/wiki/...` | `read_confluence_page` (정책서·기획서·연관 TDD) |
+| Jira | `atlassian.net/browse/PROJ-XXXX` | `mcp__claude_ai_Atlassian__getJiraIssue` (본문·하위 작업·AC, 여러 개면 모두) |
+| Confluence | `atlassian.net/wiki/...` | `mcp__claude_ai_Atlassian__getConfluencePage` (정책서·기획서·연관 TDD) |
 | Figma | `figma.com/...` | Figma MCP (`get_metadata` 구조 → `get_design_context` 컴포넌트·데이터·인터랙션) |
 | GitHub PR | `github.com/.../pull/NNN` | `gh pr view <NNN> --repo <owner>/<repo> --json title,body` (제목·본문만) |
 | Slack thread | `slack.com/...` | `slack_read_thread` |

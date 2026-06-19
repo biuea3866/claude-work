@@ -5,7 +5,7 @@ description: 본격 신기능·다중 레포 변경을 받아 PRD 사전 리뷰 
 # /feature — 본격 개발 파이프라인 (heavy 모드)
 
 ## 입력
-`$ARGUMENTS` — PRD 문서, Jira 번호(`GRT-xxxx`), 또는 신기능 요구사항
+`$ARGUMENTS` — PRD 문서, Jira 번호(`PROJ-xxxx`), 또는 신기능 요구사항
 
 ## 언제 사용하는가
 - 다중 도메인·다중 레포 변경, 3개 이상 티켓 규모
@@ -262,9 +262,9 @@ TPM 산출물의 **의존 그래프(DAG)**를 wave 스케줄러로 처리하여 
 
 | 티켓 레포 / 성격 | 서브에이전트 |
 |-----------------|-------------|
-| `greeting-db-schema` / SQL 마이그레이션 | `db-schema-writer` |
-| `greeting-topic` / Kafka 토픽 신설 | `kafka-topic-provisioner` |
-| FE 레포 (`greeting_front`, `greeting_career-next`, `greeting_forms-next`, `greeting_interview-next`, `greeting_trm_front`) | `fe-implementer` |
+| `{db-schema-repo}` / SQL 마이그레이션 | `db-schema-writer` |
+| `{kafka-topic-repo}` / Kafka 토픽 신설 | `kafka-topic-provisioner` |
+| FE 레포 (`{fe-repo}` 등) | `fe-implementer` |
 | 그 외 모든 Kotlin BE 레포 | `be-implementer` |
 
 ### 배포 순서 강제

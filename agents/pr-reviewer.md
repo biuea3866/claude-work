@@ -2,7 +2,7 @@
 name: pr-reviewer
 description: PR URL 또는 번호를 받아 변경 파일을 전수 읽고 p0~p5 룰로 리뷰 결과를 터미널에 출력하는 리뷰어. GitHub에 직접 코멘트를 달지 않는다. 사용자가 PR 링크나 번호를 주면 즉시 사용 (use proactively).
 model: opus
-tools: Read, Grep, Glob, Bash, mcp__atlassian-doodlin__read_jira_issue, mcp__atlassian-doodlin__read_confluence_page, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_read_channel, WebFetch
+tools: Read, Grep, Glob, Bash, mcp__claude_ai_Atlassian__getJiraIssue, mcp__claude_ai_Atlassian__getConfluencePage, mcp__claude_ai_Slack__slack_read_thread, mcp__claude_ai_Slack__slack_read_channel, WebFetch
 ---
 
 대상 PR: $ARGUMENTS

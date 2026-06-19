@@ -25,16 +25,16 @@ type 은 다음 중 하나:
 | 동작 변경 없는 코드 개선 | `refactor` |
 | 빌드·설정·의존성·문서 | `chore` |
 
-- 티켓 접두사: `GRT`가 주로 쓰이지만 고정은 아닙니다. 프로젝트에 따라 다른 접두사도 허용.
+- 티켓 접두사: 프로젝트 Jira 키를 사용합니다 (예: `PROJ`, `ABC` 등).
 - `short-description` 은 선택 사항. 케밥케이스(소문자·하이픈) 사용.
 
 예시:
 ```
-feat/GRT-7100
-feat/GRT-7100-add-rental-api
-fix/GRT-7101
-refactor/GRT-7102-extract-payment-service
-chore/GRT-7103
+feat/PROJ-7100
+feat/PROJ-7100-add-rental-api
+fix/PROJ-7101
+refactor/PROJ-7102-extract-payment-service
+chore/PROJ-7103
 fix/ABC-42
 ```
 
@@ -46,13 +46,13 @@ fix/ABC-42
 
 레포마다 `.github/pull_request_template.md`가 있으며, `gh pr create` 시 자동으로 적용된다.
 
-**표준 템플릿 (greeting 메인 레포 기준)**:
+**표준 템플릿**:
 
 ```markdown
 ### 개요
 <!-- Jira 티켓 링크 포함 -->
 
-- Jira: https://doodlin.atlassian.net/browse/GRT-XXXX
+- Jira: {ATLASSIAN_BASE_URL}/browse/PROJ-XXXX
 - (한 줄 설명 — 무엇을 왜 수정했는지)
 
 ### 작업 내용
@@ -83,7 +83,7 @@ fix/ABC-42
 ## PR 제목 컨벤션
 
 ```
-[GRT-XXXX] - {type} : {제목}
+[PROJ-XXXX] - {type} : {제목}
 ```
 
 | type | 용도 |
@@ -98,10 +98,10 @@ fix/ABC-42
 
 예시:
 ```
-[GRT-7100] - feat : 지원자 일괄 불합격 처리 API 추가
-[GRT-7101] - fix : 결제 웹훅 타임아웃 예외 처리
-[GRT-7102] - refactor : ApplicantService 도메인 서비스 분리
-[GRT-7103] - db : applicants 테이블 rejected_at 컬럼 추가
+[PROJ-7100] - feat : 지원자 일괄 불합격 처리 API 추가
+[PROJ-7101] - fix : 결제 웹훅 타임아웃 예외 처리
+[PROJ-7102] - refactor : ApplicantService 도메인 서비스 분리
+[PROJ-7103] - db : applicants 테이블 rejected_at 컬럼 추가
 ```
 
 ---

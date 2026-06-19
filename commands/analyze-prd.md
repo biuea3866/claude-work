@@ -5,9 +5,9 @@ description: PRD·Jira·요구사항(+Figma URL·FE 레포)을 받아 디자인�
 # /analyze-prd — PRD 영향 분석 (구현 없음)
 
 ## 입력
-`$ARGUMENTS` — PRD 문서 경로·Confluence URL, Jira 번호(`GRT-xxxx`), 또는 요구사항 텍스트
+`$ARGUMENTS` — PRD 문서 경로·Confluence URL, Jira 번호(`PROJ-xxxx`), 또는 요구사항 텍스트
 - **Figma URL** (선택) — 화면 디자인. 제공 시 MCP(claude.ai Figma)로 읽어 화면이 요구하는 데이터·상태·액션을 BE 계약 후보로 추출
-- **FE 레포** (선택) — 관련 FE 레포(`greeting_front`, `greeting_career-next`, `greeting_forms-next`, `greeting_interview-next`, `greeting_trm_front` 등). 제공·식별 시 API 호출부(`@api/`, BFF)를 역추적해 기대 스키마 파악
+- **FE 레포** (선택) — 관련 FE 레포. 제공·식별 시 API 호출부(`@api/`, BFF)를 역추적해 기대 스키마 파악
 
 ## 언제 사용하는가
 - 구현 전에 **영향 범위·티켓 분해·의존 그래프(DAG)만 먼저** 확인하고 싶을 때
@@ -77,7 +77,7 @@ prd-reviewer는 다음을 확인한다:
 **에이전트**: `tpm`
 **입력**: `$ARGUMENTS` (+ 제공된 Figma URL·FE 레포)
 **출력 저장**: `.analysis/outputs/{YYYYMMDD}_{기능명}/tpm-analysis.md`
-  - Jira 입력이면 `{YYYYMMDD}_{GRT-번호}` 사용 (예: `20260527_GRT-4324`)
+  - Jira 입력이면 `{YYYYMMDD}_{PROJ-번호}` 사용 (예: `20260527_PROJ-4324`)
 
 > Figma URL·FE 레포가 제공되면 tpm이 Phase 1(2-A·2-B)에서 디자인(MCP)·FE 호출부를 읽어 BE 계약을 역산한다. 화면·FE가 요구하는 데이터·액션이 API 변경 목록에 반영된다.
 

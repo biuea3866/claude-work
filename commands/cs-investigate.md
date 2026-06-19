@@ -45,7 +45,7 @@ Slack 스레드 URL
 
 Slack URL에서 channel_id와 message_ts를 추출해 MCP로 스레드 전체를 읽는다.
 
-- URL 형식: `https://doodlin-corp.slack.com/archives/<channel_id>/p<ts_without_dot>`
+- URL 형식: `https://<workspace>.slack.com/archives/<channel_id>/p<ts_without_dot>`
 - `p1778658096498009` → message_ts = `1778658096.498009`
 
 추출 항목:
@@ -69,18 +69,14 @@ Slack URL에서 channel_id와 message_ts를 추출해 MCP로 스레드 전체를
 
 ### 도메인 → 서비스명 매핑
 
+프로젝트별 실제 서비스·레포 목록은 `.architecture/` 디렉토리 또는 `CLAUDE.md`를 참조합니다.
+아래는 일반적인 예시 구조입니다.
+
 | 도메인/화면 | Datadog service | 레포 |
 |------------|-----------------|------|
-| 지원자·공고·평가·파이프라인 | `greeting` | `greeting/greeting-new-back` |
-| 오케스트레이션·집계 | `greeting-aggregator` | `greeting/greeting-aggregator` |
-| 워크스페이스 | `greeting-workspace` | `greeting-workspace-server` |
-| 결제·구독·플랜 | `greeting-payment` | `greeting_payment-server` |
-| 인증 (로그인·SSO) | `greeting-authn` | `greeting_authn-server` |
-| 인가 (권한) | `greeting-authz` | `greeting_authz-server` |
-| 메일·알림톡·문자 | `greeting-communication` | `greeting-communication` |
-| 대시보드 | `greeting-dashboard` | `greeting_dashboard-back` |
-| TRM | `greeting-trm` | `greeting_trm-server` |
-| 채용 페이지 | `greeting-career` | `greeting_career-next` |
+| (프로젝트 핵심 도메인) | `{service-name}` | `{be-repo}` |
+| 인증 (로그인) | `{service}-authn` | `{authn-repo}` |
+| 메일·알림 | `{service}-notification` | `{notification-repo}` |
 
 ---
 
@@ -145,7 +141,7 @@ curl -sS -X POST "https://api.${DD_SITE}/api/v2/logs/events/search" \
    grep -n "<키워드>" .architecture/<repo>/api-map.md | head -20
    grep -n "<키워드>" .architecture/<repo>/domain-map.md | grep -i "facade\|service\|port" | head -40
    ```
-   > `greeting-new-back/domain-map.md` 32K 초과 — 반드시 grep 필터 후 읽기
+   > 대형 `domain-map.md`는 반드시 grep 필터 후 읽기
 2. **레이어 순서로 추적** — Controller → UseCase/Facade → DomainService → Entity ← Repository
 3. **스택 프레임 직접 grep** — 스냅샷으로 좁힌 후 실제 파일에서 Grep으로 클래스·메서드 위치 확인
 4. **코드 확인** — Read로 해당 메서드 ±20줄 읽기

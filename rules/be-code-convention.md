@@ -95,6 +95,75 @@ class Product(...) {
 - Domain Event는 Entity 내부 `@Transient domainEvents` 리스트에 적재 → DomainService가 `DomainEventPublisher.publishAll()`로 발행
 - 다른 도메인 데이터는 **ID(Long)만 보유** — Entity 객체 직접 참조 금지
 
+### Domain Entity와 JPA Entity 분리 시 — POJO 생성·필드 규칙
+
+Domain layer에 순수 POJO 도메인 엔티티를 두고 JPA Entity는 infrastructure로 분리한 경우 아래 규칙을 따른다.
+
+#### 1. 생성자 `private` — 팩토리 메서드 강제
+
+- **생성자는 `private`** — 외부에서 `Rental(...)` 직접 호출 금지.
+- 생성 의도는 **정적 팩토리 메서드**(`create`, `reconstitute` 등)로만 노출한다.
+  - `create(command)` — 신규 생성 (비즈니스 규칙 검증 포함)
+  - `reconstitute(...)` — 영속화 계층에서 복원 (검증 없이 필드 그대로 복구)
+- 두 팩토리의 분리가 **템플릿 메서드 패턴**의 역할을 한다: 공통 생성 로직은 `private` 생성자에, 진입 경로별 전처리는 각 팩토리 메서드에 위치시킨다.
+
+#### 2. 생성자 파라미터 기본값 금지
+
+- 생성자 파라미터에 기본값(`= null`, `= 0`, `= ""` 등) **금지**.
+- 기본값은 "빈 상태로 만들고 나중에 채운다"는 Anemic 패턴을 조장한다.
+- 초기값이 필요하면 팩토리 메서드 내부에서 명시적으로 설정한다.
+
+#### 3. 필드 `private var` — 비즈니스 메서드로만 변경
+
+- 모든 가변 필드는 `private var` — `public var`도 `val`도 아님.
+- `public var` 금지 — 외부 직접 대입은 비즈니스 규칙을 우회한다.
+- `val` 대신 `var` — 상태는 비즈니스 메서드를 통해 변할 수 있어야 한다.
+- 읽기 전용 노출이 필요하면 `get()`-only 프로퍼티로 제한한다.
+
+```kotlin
+// ❌ BAD — public 생성자, 기본값, public var
+class Rental(
+    var status: RentalStatus = RentalStatus.PENDING,
+    var returnedAt: ZonedDateTime? = null,
+)
+
+// ✅ GOOD — private 생성자 + 기본값 없음 + private var + 팩토리 메서드
+class Rental private constructor(
+    private var status: RentalStatus,
+    private var returnedAt: ZonedDateTime?,
+) {
+    val currentStatus: RentalStatus get() = status
+    val isReturned: Boolean get() = returnedAt != null
+
+    // 신규 생성 — 비즈니스 규칙 검증 포함
+    companion object {
+        fun create(command: RequestRentalCommand): Rental {
+            require(command.productId > 0) { "productId must be positive" }
+            return Rental(
+                status = RentalStatus.REQUESTED,
+                returnedAt = null,
+            )
+        }
+
+        // 영속화 계층 복원 — 검증 없이 필드 그대로 복구
+        fun reconstitute(
+            status: RentalStatus,
+            returnedAt: ZonedDateTime?,
+        ): Rental = Rental(
+            status = status,
+            returnedAt = returnedAt,
+        )
+    }
+
+    // 상태 변경은 의도가 드러나는 비즈니스 메서드만 허용
+    fun returnItem(returnedAt: ZonedDateTime) {
+        status.validateCanReturn()          // Enum 내부에서 전이 가능 여부 검증
+        this.status = RentalStatus.RETURNED
+        this.returnedAt = returnedAt
+    }
+}
+```
+
 ## 레이어 의존 방향
 
 ```

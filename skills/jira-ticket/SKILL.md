@@ -1,6 +1,6 @@
 ---
 name: jira-ticket
-description: md 티켓 파일을 받아 Jira GRT 프로젝트에 이슈를 생성하고 렌더링을 검토한다. 티켓 md 파일 경로 또는 내용을 인수로 받는다.
+description: md 티켓 파일을 받아 Jira 프로젝트에 이슈를 생성하고 렌더링을 검토한다. 티켓 md 파일 경로 또는 내용을 인수로 받는다.
 model: sonnet
 user-invocable: true
 ---
@@ -14,10 +14,10 @@ user-invocable: true
 ## 프로젝트 상수
 
 ```
-PROJECT_KEY = GRT
-BASE_URL    = https://doodlin.atlassian.net
-AUTH        = biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}
-MY_ACCOUNT  = 6253e04056e5a8006dd85631
+PROJECT_KEY = {PROJECT_KEY}          # 예: GRT, ABC 등 실제 프로젝트 키로 교체
+BASE_URL    = {ATLASSIAN_BASE_URL}   # 예: https://your-org.atlassian.net
+AUTH        = ${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}
+MY_ACCOUNT  = {ACCOUNT_ID}           # Jira 계정 ID
 ```
 
 ### 이슈 타입 ID
@@ -96,27 +96,27 @@ description은 반드시 **Atlassian Document Format(ADF)** 으로 작성한다.
 | M | D+2 |
 | L | D+3 |
 
-**생성 순서**: 의존 없는 티켓을 먼저 생성해 `GRT-XXXX` 키를 확보한 후, 의존 있는 티켓을 생성하고 Step 4에서 `is blocked by` 링크를 연결한다.
+**생성 순서**: 의존 없는 티켓을 먼저 생성해 `PROJ-XXXX` 키를 확보한 후, 의존 있는 티켓을 생성하고 Step 4에서 `is blocked by` 링크를 연결한다.
 
 ```bash
 curl -s -X POST \
-  "https://doodlin.atlassian.net/rest/api/3/issue" \
-  -u "biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}" \
+  "{ATLASSIAN_BASE_URL}/rest/api/3/issue" \
+  -u "${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "fields": {
-      "project": {"key": "GRT"},
+      "project": {"key": "{PROJECT_KEY}"},
       "issuetype": {"id": "10093"},
       "summary": "[BE] 티켓 제목",
       "description": { "type":"doc","version":1,"content": [...] },
-      "assignee": {"accountId": "6253e04056e5a8006dd85631"},
+      "assignee": {"accountId": "{ACCOUNT_ID}"},
       "customfield_10015": "YYYY-MM-DD",
       "duedate": "YYYY-MM-DD"
     }
   }' | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('key', d))"
 ```
 
-생성된 `GRT-XXXX` 키를 기록한다.
+생성된 `PROJ-XXXX` 키를 기록한다.
 
 ---
 
@@ -126,13 +126,13 @@ curl -s -X POST \
 
 ```bash
 curl -s -X POST \
-  "https://doodlin.atlassian.net/rest/api/3/issueLink" \
-  -u "biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}" \
+  "{ATLASSIAN_BASE_URL}/rest/api/3/issueLink" \
+  -u "${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "type": {"id": "10000"},
-    "inwardIssue":  {"key": "GRT-XXXX"},
-    "outwardIssue": {"key": "GRT-YYYY"}
+    "inwardIssue":  {"key": "PROJ-XXXX"},
+    "outwardIssue": {"key": "PROJ-YYYY"}
   }'
 ```
 
@@ -143,8 +143,8 @@ curl -s -X POST \
 생성 직후 본문을 재조회해 ADF 블록 구조를 확인한다.
 
 ```bash
-curl -s "https://doodlin.atlassian.net/rest/api/3/issue/GRT-XXXX?fields=summary,description" \
-  -u "biuea@doodlin.co.kr:${ATLASSIAN_API_TOKEN}" \
+curl -s "{ATLASSIAN_BASE_URL}/rest/api/3/issue/PROJ-XXXX?fields=summary,description" \
+  -u "${ATLASSIAN_EMAIL}:${ATLASSIAN_API_TOKEN}" \
   | python3 -c "
 import json, sys
 d = json.load(sys.stdin)['fields']
@@ -170,7 +170,7 @@ for block in (d.get('description') or {}).get('content', []):
 
 브라우저 확인:
 ```bash
-open "https://doodlin.atlassian.net/browse/GRT-XXXX"
+open "{ATLASSIAN_BASE_URL}/browse/PROJ-XXXX"
 ```
 
 ### 흔한 렌더링 문제
@@ -189,8 +189,8 @@ open "https://doodlin.atlassian.net/browse/GRT-XXXX"
 ## 완료 보고
 
 ```
-GRT-XXXX 생성 완료
+PROJ-XXXX 생성 완료
 summary: [BE] 티켓 제목
-링크: https://doodlin.atlassian.net/browse/GRT-XXXX
+링크: {ATLASSIAN_BASE_URL}/browse/PROJ-XXXX
 렌더링: ✅ (또는 이슈 내용)
 ```
