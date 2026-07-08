@@ -75,3 +75,22 @@ for f in .claude/hooks/*.sh; do bash -n "$f" && echo "OK $f" || echo "FAIL $f"; 
 echo '{"tool_input":{"command":"git commit -m \"feat: x\""}}' | .claude/hooks/custom-check-commit-prefix.sh && echo "통과(이상)" || echo "차단(정상)"
 echo '{"tool_input":{"command":"git commit -m \"[GRT-1] - fix: x\""}}' | .claude/hooks/custom-check-commit-prefix.sh && echo "통과(정상)" || echo "차단(이상)"
 ```
+
+---
+
+## 개인 프로젝트 전용 훅 (private-*)
+
+**스코핑**: 레포 루트에 마커 파일 `.claude/private-project` 가 있는 레포에서만 동작한다 (명시적 opt-in).
+마커는 **레포에 커밋**해 둘 것 — 에이전트가 만드는 격리 worktree 체크아웃에도 존재해야 훅이 동작한다.
+판정 로직은 `lib/private-project-guard.sh` (CLAUDE_PROJECT_DIR → 파일 경로/cwd 상향 탐색).
+
+| 파일 | 시점 | matcher | 동작 | 차단? |
+|---|---|---|---|---|
+| `private-forbidden-patterns.sh` | PreToolUse | `Edit\|Write\|MultiEdit` | BE(@Query·@Lob·LocalDateTime/Instant/Clock·`!!`·ConsumerRecord)·FE(any·색 하드코딩) 금지 패턴 검사 — harness-rules.json 없는 개인 환경의 기계적 방어선. 검사 본체 `lib/private-forbidden-patterns.py`. 우회: 해당 라인 `// private-allow:<rule-id>` | ✅ |
+| `private-block-destructive.sh` | PreToolUse | `Bash` | FLUSHALL/FLUSHDB · DROP TABLE/DATABASE · TRUNCATE · kafka-topics --delete · git push --force 차단. 우회: `# destructive-confirmed` (사용자 확인 후) | ✅ |
+| `private-push-test.sh` | PreToolUse | `Bash` | `git push` 전 테스트 통과 확인 강제. 우회: `# tests-passed` (테스트 exit 0 확인 후) | ✅ |
+| `private-auto-merge-gate.sh` | PreToolUse | `Bash` | `gh pr merge` 는 private-code-reviewer 재리뷰에서 p0~p3 전부 반영 확인 후에만. 우회: `# p3-reflected` (p4/p5 는 머지를 막지 않음) | ✅ |
+| `private-prod-deploy-gate.sh` | PreToolUse | `Bash` | `docker compose` prod 배포(`-f *prod*`/`--profile prod` + `up`/`run`)는 private-qa verdict PASS 후에만. 우회: `# qa-passed` (rules/private-deploy-convention.md) | ✅ |
+| `private-tdd-first-reminder.sh` | PostToolUse | `Edit\|Write\|MultiEdit` | src/main·src 프로덕션 소스 수정 시 대응 테스트 파일 부재를 감지해 TDD(RED 먼저) 리마인더 주입 (휴리스틱, JSON `additionalContext`) | — |
+
+기준 규칙: `rules/private-be-code-convention.md` · `rules/private-fe-convention.md` · `rules/private-{db-schema,kafka,redis}-convention.md`

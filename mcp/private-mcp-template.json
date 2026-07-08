@@ -1,0 +1,38 @@
+{
+  "_service": "[개인] 레포별 .mcp.json 템플릿",
+  "_status": "template",
+  "_note": "개인 레포에서 MCP가 필요해질 때만 이 파일을 레포 루트 .mcp.json 으로 복사하고, 필요한 서버 블록만 남긴다. 기본 방침은 MCP 없음 — private-policy.md 참조.",
+  "_usage": [
+    "1) cp ~/.claude/mcp/private-mcp-template.json <레포>/.mcp.json",
+    "2) 필요한 서버만 남기고 삭제, _로 시작하는 메타 키 제거",
+    "3) 시크릿은 ${ENV_VAR} 참조로 유지 — 값을 파일에 넣지 않는다 (커밋 대상이므로)",
+    "4) private-policy.md 의 표에 승격 사유를 기록"
+  ],
+  "mcpServers": {
+    "mysql-local": {
+      "_note": "로컬 MySQL 조회가 SQL 대화형으로 자주 필요할 때. read-only 계정 권장.",
+      "command": "npx",
+      "args": ["-y", "@benborla29/mcp-server-mysql"],
+      "env": {
+        "MYSQL_HOST": "127.0.0.1",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "readonly",
+        "MYSQL_PASS": "${MYSQL_READONLY_PASSWORD}",
+        "MYSQL_DB": "app"
+      }
+    },
+    "redis-local": {
+      "_note": "redis-cli 로 부족할 때만.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-redis", "redis://127.0.0.1:6379"]
+    },
+    "github": {
+      "_note": "gh CLI 로 부족할 때만 — hook 게이트(p3-reflected 등)는 gh 명령 기준이므로 MCP merge 도구 사용 시 게이트를 우회하게 된다. 사용하려면 hook 확장 필요.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT_PRIVATE}"
+      }
+    }
+  }
+}
