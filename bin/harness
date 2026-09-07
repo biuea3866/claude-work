@@ -1,0 +1,2670 @@
+#!/usr/bin/env python3
+"""harness — 하네스 빌드·검증 도구
+
+  harness build [--runtime R] [--install]   policy.json → 런타임 설정 (기본 드라이런)
+  harness link  [--install]                 런타임 디렉토리 → ~/.harness 심링크 (기본 드라이런)
+  harness lint                              정의 정합성 검사 (exit 1 = 오류)
+  harness role [ROLE...] [--json]           role 의 (agent, runtime, model, invoke) 해석
+  harness rules [PATH...] [--context C]     그 파일에 적용되는 규칙만 산출 (전량 로드 방지)
+  harness graph [--profile P] [--sync]      그래프 노드별 라우팅 해석 (--sync = _routing 주석 갱신)
+  harness validate CONTRACT RESULT          산출물이 계약(스키마 + 의미 규칙)을 만족하는지
+  harness usage [RUNTIME] [--json]          런타임 사용량·임계 조회 (exit 1 = 임계 초과)
+  harness run <new|status|next|dispatch|wave|done|fail|gate|budget>
+                                            그래프 실행 상태 기계 (runs/ 기록)
+                                            dispatch = ready 노드를 실제 실행 · wave = 티켓 워크트리 병렬
+  harness score                             진단 Rubric 채점 (영역별 PASS/PARTIAL/FAIL)
+  harness doctor                            런타임 능력·심링크·생성물 드리프트 진단
+  harness eval [--task T]                   골든 태스크 목록·실행 안내
+  harness test [NAME...]                    tests/*.py 실행 (exit 1 = 실패)
+  harness plan from-tickets <디렉토리>        티켓 md → plan 산출물 (run new --seed-plan 입력)
+"""
+import json, os, re, subprocess, sys
+
+HARNESS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNTIMES = ["claude-code", "codex", "gemini", "cursor"]
+
+RED, YEL, GRN, DIM, RST = "\033[31m", "\033[33m", "\033[32m", "\033[2m", "\033[0m"
+errors, warns = [], []
+
+
+def err(msg):  errors.append(msg); print(f"{RED}✗{RST} {msg}")
+def warn(msg): warns.append(msg);  print(f"{YEL}!{RST} {msg}")
+def ok(msg):   print(f"{GRN}✓{RST} {msg}")
+def info(msg): print(f"{DIM}  {msg}{RST}")
+
+
+FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---", re.S)
+
+
+def frontmatter(path):
+    """파일 상단 frontmatter 본문. 없으면 빈 문자열."""
+    if not os.path.exists(path):
+        return ""
+    with open(path, errors="ignore") as f:
+        m = FRONTMATTER_RE.match(f.read())
+    return m.group(1) if m else ""
+
+
+def fm_value(block, key):
+    m = re.search(rf"^{key}:\s*(.+)$", block, re.M)
+    return m.group(1).strip() if m else None
+
+
+def fm_list(block, key):
+    raw = fm_value(block, key)
+    if not raw:
+        return []
+    return [x.strip().strip("\"'") for x in raw.strip("[]").split(",") if x.strip()]
+
+
+def load(rel, default=None):
+    path = rel if os.path.isabs(rel) else os.path.join(HARNESS, rel)
+    if not os.path.exists(path):
+        return default
+    with open(path) as f:
+        return json.load(f)
+
+
+# ── build ────────────────────────────────────────────────────────────────────
+def cmd_build(args):
+    install = "--install" in args
+    only = None
+    if "--runtime" in args:
+        only = args[args.index("--runtime") + 1]
+    rc = 0
+    for runtime in RUNTIMES:
+        if only and runtime != only:
+            continue
+        script = os.path.join(HARNESS, "adapters", runtime, "build.py")
+        if not os.path.exists(script):
+            info(f"[{runtime}] 어댑터 미구현 — 건너뜀 (adapters/{runtime}/README.md 참조)")
+            continue
+        cmd = [sys.executable, script] + (["--install"] if install else [])
+        rc |= subprocess.call(cmd)
+    return rc
+
+
+# ── link ─────────────────────────────────────────────────────────────────────
+def cmd_link(args):
+    install = "--install" in args
+    changed = 0
+    for runtime in RUNTIMES:
+        caps = load(f"adapters/{runtime}/capabilities.json")
+        if not caps or caps.get("link_strategy") != "whole-dir":
+            continue
+        for target_rel, src_rel in caps.get("links", {}).items():
+            target = os.path.expanduser(target_rel)
+            src = os.path.join(HARNESS, src_rel)
+            if not os.path.isdir(src):
+                err(f"[{runtime}] 링크 원본 없음: {src}")
+                continue
+            if os.path.islink(target):
+                if os.path.realpath(target) == os.path.realpath(src):
+                    ok(f"[{runtime}] {target_rel} → {src_rel} (이미 연결됨)")
+                    continue
+                warn(f"[{runtime}] {target_rel} 이 다른 곳을 가리킴: {os.readlink(target)}")
+            elif not os.path.exists(target):
+                warn(f"[{runtime}] {target_rel} 없음 — 새로 링크")
+            changed += 1
+            if not install:
+                info(f"[{runtime}] 예정: {target_rel} → {src_rel}")
+                continue
+            backup = target + ".pre-harness"
+            if os.path.islink(target):
+                os.unlink(target)
+            elif os.path.exists(target):
+                if os.path.exists(backup):
+                    err(f"[{runtime}] 백업 경로가 이미 존재: {backup} — 수동 확인 필요")
+                    continue
+                os.rename(target, backup)
+                info(f"[{runtime}] 원본 백업: {backup}")
+            os.symlink(src, target)
+            ok(f"[{runtime}] 링크 생성: {target_rel} → {src_rel}")
+    if not install and changed:
+        info(f"드라이런 — {changed}건 예정. 적용하려면 --install")
+    return 1 if errors else 0
+
+
+# ── lint ─────────────────────────────────────────────────────────────────────
+LEVELS = {"L0": 0, "L1": 1, "L2": 2}
+TIERS = ("T0", "T1", "T2", "T3")
+
+
+# ── 라우팅 해석 ───────────────────────────────────────────────────────────────
+def node_roles(node):
+    """노드가 실제로 수행할 role 목록. fanout 이면 후보 전부."""
+    fanout = node.get("fanout") or {}
+    return fanout.get("roles") or [node["role"]]
+
+
+def resolve_routing(roles, role_name, node=None, profile_name=None):
+    """(role, 노드 override, 프로파일) → 최종 (runtime, tier, model_id, effort, agent).
+
+    노드 override 가 있으면 그것이 이기고, 없으면 프로파일 바인딩으로 떨어진다.
+    """
+    profile_name = profile_name or roles.get("active_profile")
+    profile = roles.get("bindings", {}).get(profile_name, {})
+    if node and node.get("runtime") and node.get("tier"):
+        binding = {"runtime": node["runtime"], "tier": node["tier"], "_source": "node"}
+    else:
+        binding = dict(profile.get(role_name) or profile.get("_default") or {})
+        binding["_source"] = "profile"
+    runtime = roles.get("runtimes", {}).get(binding.get("runtime"))
+    if not runtime:
+        return None
+    tier = runtime.get("tiers", {}).get(binding.get("tier")) or {}
+    model = runtime.get("models", {}).get(tier.get("model")) or {}
+    return {
+        "role": role_name,
+        "runtime": binding["runtime"],
+        "tier": binding["tier"],
+        "model": model.get("id"),
+        "model_key": tier.get("model"),
+        "effort": tier.get("effort"),
+        "agent": roles.get("roles", {}).get(role_name, {}).get("agent"),
+        "source": binding["_source"],
+    }
+
+
+def routing_label(r):
+    """_routing 주석 한 줄. lint 가 이 문자열로 드리프트를 잡는다."""
+    model = r["model"] or "런타임 기본 모델"
+    effort = f", effort={r['effort']}" if r.get("effort") else ""
+    return f"{r['role']} → {r['runtime']}/{r['tier']} → {model}{effort} · {r['agent']}"
+
+
+def invoke_command(r, prompt="<프롬프트>", cwd="<worktree>", roles=None):
+    """해석된 라우팅 → 사람이 손으로 부를 때의 커맨드.
+
+    **자동 실행 경로는 이 문자열을 쓰지 않는다** — `harness run dispatch` 가 어댑터로
+    argv 를 조립한다. 여기 문자열은 메인 세션이 Agent 툴로 부르거나, 어댑터가 없는 런타임을
+    수동 실행할 때의 안내다. 조립 규칙이 두 곳에 있으면 어긋나므로, 가능한 경우
+    **어댑터가 만든 argv 를 그대로 보여 준다** (ADR 0005).
+    """
+    if r["runtime"] == "claude":
+        # 메인 세션은 헤드리스 CLI 가 아니라 Agent 툴을 쓴다 (컨텍스트를 물려받는다).
+        return f'Agent(subagent_type="{r["agent"]}", model="{r["model_key"]}")'
+
+    ad = load_runner("adapter")
+    if ad:
+        try:
+            adapters = ad.load_adapters()
+        except Exception:  # noqa: BLE001
+            adapters = {}
+        adapter = adapters.get(r["runtime"])
+        if adapter:
+            exec_cfg = ((roles or {}).get("roles", {}).get(r["role"]) or {}).get("exec") or {}
+            spec = {"id": r["role"], "runtime": r["runtime"], "model": r["model"],
+                    "effort": r.get("effort")}
+            try:
+                spec, _ = ad.project_exec(spec, exec_cfg, adapter)
+                argv = ad.build_command(spec, adapter, "<out>/result.json", cwd)
+            except Exception:  # noqa: BLE001
+                argv = None
+            if argv:
+                import shlex as _shlex
+                persona = f"~/.harness/agents/{r['agent']}.md"
+                if adapter["prompt_delivery"] == "argv":
+                    return (f'{_shlex.join(argv)} "$(cat {persona}; echo; echo \'{prompt}\')"')
+                return (f'{{ cat {persona}; echo; echo "{prompt}"; }} | '
+                        f'{_shlex.join(argv)}')
+    return f'현재 세션 런타임에서 {r["agent"]} 페르소나로 직접 수행 (모델 미지정)'
+
+
+# ── 런타임 사용량 예산 ────────────────────────────────────────────────────────
+WEEKLY_MINUTES = 10080
+
+
+def codex_weekly_usage(sessions_dir=None):
+    """codex 주간 사용률을 세션 rollout 로그에서 읽는다. 없으면 None.
+
+    codex CLI 는 사용량 조회 명령을 제공하지 않는다 — 세션 로그의
+    token_count 이벤트에 실린 rate_limits 스냅샷이 유일한 소스다.
+    가장 최근 로그부터 훑어 마지막 스냅샷의 '가장 넓은 창'(주간)을 고른다.
+    """
+    sessions_dir = (sessions_dir or os.environ.get("HARNESS_CODEX_SESSIONS_DIR")
+                    or os.path.expanduser("~/.codex/sessions"))
+    if not os.path.isdir(sessions_dir):
+        return None
+    files = []
+    for root, _dirs, names in os.walk(sessions_dir):
+        for name in names:
+            if name.endswith(".jsonl"):
+                path = os.path.join(root, name)
+                files.append((os.path.getmtime(path), path))
+    for _mtime, path in sorted(files, reverse=True)[:5]:
+        snapshot = None
+        with open(path, errors="ignore") as f:
+            for line in f:
+                if '"rate_limits"' not in line:
+                    continue
+                try:
+                    limits = (json.loads(line).get("payload") or {}).get("rate_limits")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(limits, dict):
+                    snapshot = limits
+        if not snapshot:
+            continue
+        windows = [w for key in ("primary", "secondary")
+                   for w in [snapshot.get(key)]
+                   if isinstance(w, dict) and w.get("used_percent") is not None]
+        if not windows:
+            continue
+        widest = max(windows, key=lambda w: w.get("window_minutes") or 0)
+        import time
+        resets_at = widest.get("resets_at")
+        # 마지막 호출 이후 창이 리셋됐으면 이 수치는 무효다 — 옛 값으로 전환을 걸지 않는다
+        stale = bool(resets_at and resets_at < time.time())
+        return {"runtime": "codex", "percent": float(widest["used_percent"]),
+                "window_minutes": widest.get("window_minutes"),
+                "resets_at": resets_at, "stale": stale,
+                "source": path, "observed_at": now_iso()}
+    return None
+
+
+def runtime_usage(runtime):
+    """런타임의 현재 사용률. 환경변수 override 가 있으면 그것을 우선한다.
+
+    HARNESS_CODEX_USAGE_PERCENT — 로그를 못 읽는 환경(원격·CI)에서 수동 주입.
+    """
+    override = os.environ.get(f"HARNESS_{runtime.upper()}_USAGE_PERCENT")
+    if override:
+        try:
+            percent = float(override)
+        except ValueError:
+            warn(f"HARNESS_{runtime.upper()}_USAGE_PERCENT 값이 숫자가 아님: {override!r}")
+            return None
+        return {"runtime": runtime, "percent": percent, "window_minutes": WEEKLY_MINUTES,
+                "resets_at": None, "source": f"env:HARNESS_{runtime.upper()}_USAGE_PERCENT",
+                "observed_at": now_iso()}
+    if runtime == "codex":
+        return codex_weekly_usage()
+    return None
+
+
+def budget_policy(roles, runtime):
+    """runtime_budget 에 선언된 그 런타임의 상한 정책. 없으면 None."""
+    spec = (roles or {}).get("runtime_budget", {}).get(runtime)
+    return spec if isinstance(spec, dict) else None
+
+
+def usage_line(usage, policy=None):
+    """사용량 한 줄 요약."""
+    if not usage:
+        return "사용량 확인 불가 (세션 로그 없음 — codex 를 한 번도 호출하지 않았거나 로그가 정리됨)"
+    window = "주간" if (usage.get("window_minutes") or 0) >= WEEKLY_MINUTES else \
+             f"{usage.get('window_minutes')}분 창"
+    line = f"{usage['runtime']} {window} 사용량 {usage['percent']}%"
+    if policy:
+        line += f" / 임계 {policy.get('threshold_percent')}%"
+    if usage.get("resets_at"):
+        import datetime
+        reset = datetime.datetime.fromtimestamp(usage["resets_at"])
+        line += f" · 리셋 {reset:%Y-%m-%d %H:%M}"
+    if usage.get("stale"):
+        line += " · stale (리셋 시각이 지남 — 다음 호출 전까지 판정 보류)"
+    return line
+
+
+def expected_routing(roles, node, profile_name=None):
+    """노드의 _routing 기대값. 단일 role 이면 문자열, fanout 이면 배열."""
+    labels = []
+    for role_name in node_roles(node):
+        r = resolve_routing(roles, role_name, node, profile_name)
+        if not r:
+            return None
+        labels.append(routing_label(r))
+    return labels if len(labels) > 1 else labels[0]
+
+
+def lint_binding_value(where, value, runtimes):
+    """바인딩 항목 {runtime, tier} 의 값 자체를 검증한다. 유효하면 (runtime, tier) 반환."""
+    if not isinstance(value, dict):
+        err(f"{where}: 바인딩 값이 {{runtime, tier}} 객체가 아님: {value!r}")
+        return None
+    runtime, tier = value.get("runtime"), value.get("tier")
+    if runtime not in runtimes:
+        err(f"{where}: 존재하지 않는 runtime '{runtime}' "
+            f"(runtimes 에 정의된 것: {', '.join(sorted(runtimes)) or '없음'})")
+        return None
+    if tier not in TIERS:
+        err(f"{where}: tier 값이 잘못됨: {tier!r} (허용: {'/'.join(TIERS)})")
+        return None
+    if tier not in runtimes[runtime].get("tiers", {}):
+        err(f"{where}: runtime '{runtime}' 에 tier '{tier}' 매핑이 없음")
+        return None
+    return runtime, tier
+
+
+def lint_roles():
+    roles = load("roles.json")
+    if not roles:
+        err("roles.json 없음")
+        return None
+
+    runtimes = roles.get("runtimes", {})
+    if not runtimes:
+        err("roles.json: runtimes 블록 없음 — 노드가 어느 LLM에서 도는지 정의할 자리가 없다")
+    for rt, spec in runtimes.items():
+        if spec.get("level") is not None and spec.get("level") not in LEVELS:
+            err(f"roles.json: runtime '{rt}' 의 level 값이 잘못됨: {spec.get('level')}")
+        models = spec.get("models", {})
+        if not models:
+            err(f"roles.json: runtime '{rt}' 에 models 카탈로그 없음 — 어느 모델을 쓸지 정의할 자리가 없다")
+        for mkey, m in models.items():
+            if "id" not in m:
+                err(f"roles.json: runtime '{rt}' 의 모델 '{mkey}' 에 id 없음")
+            if rt == "claude" and not m.get("alias"):
+                err(f"roles.json: claude 모델 '{mkey}' 에 alias 없음 "
+                    f"— Agent 툴은 alias 만 받는다")
+            if m.get("verified") is False:
+                warn(f"roles.json: runtime '{rt}' 의 모델 '{mkey}'({m.get('id')}) 미검증 "
+                     f"— 첫 호출 전 id 확인 필요")
+        for tier in TIERS:
+            t = spec.get("tiers", {}).get(tier)
+            if not isinstance(t, dict) or "model" not in t:
+                err(f"roles.json: runtime '{rt}' 의 tier {tier} 가 {{model, effort?}} 객체가 아님")
+            elif t["model"] not in models:
+                err(f"roles.json: runtime '{rt}' 의 tier {tier} 가 카탈로그에 없는 모델 "
+                    f"'{t['model']}' 을 가리킴")
+
+    names = set(roles.get("roles", {}))
+    for role, spec in roles.get("roles", {}).items():
+        agent = os.path.join(HARNESS, "agents", spec["agent"] + ".md")
+        if not os.path.exists(agent):
+            err(f"roles.json: role '{role}' 의 agent '{spec['agent']}' 파일 없음")
+        if spec.get("requires") not in LEVELS:
+            err(f"roles.json: role '{role}' 의 requires 값이 잘못됨: {spec.get('requires')}")
+
+    for profile, binding in roles.get("bindings", {}).items():
+        if not isinstance(binding, dict):
+            err(f"roles.json: 프로파일 '{profile}' 이 객체가 아님")
+            continue
+        default = binding.get("_default")
+        if default is None:
+            err(f"roles.json: 프로파일 '{profile}' 에 _default 없음 "
+                f"— 명시되지 않은 role 의 배정이 미정의가 된다")
+        else:
+            lint_binding_value(f"roles.json: '{profile}'._default", default, runtimes)
+        for key, value in binding.items():
+            if key.startswith("_"):
+                continue
+            if key not in names:
+                err(f"roles.json: 프로파일 '{profile}' 이 존재하지 않는 role '{key}' 를 바인딩")
+                continue
+            lint_binding_value(f"roles.json: '{profile}'.{key}", value, runtimes)
+        # role 별 최종 해석값이 role.requires 를 만족하는지
+        for role, spec in roles.get("roles", {}).items():
+            value = binding.get(role, default)
+            if not isinstance(value, dict):
+                continue
+            rt = runtimes.get(value.get("runtime"))
+            if not rt or spec.get("requires") not in LEVELS or rt.get("level") not in LEVELS:
+                continue  # level 이 null 인 런타임(host)은 정적 판정 불가 — 검사 제외
+            if LEVELS[rt["level"]] < LEVELS[spec["requires"]] and not value.get("_degrade"):
+                warn(f"roles.json: '{profile}'.{role} — role requires {spec['requires']} 인데 "
+                     f"runtime '{value['runtime']}' 은 {rt['level']}. _degrade 로 강등 경로를 명시하세요")
+
+    for runtime, budget in (roles.get("runtime_budget") or {}).items():
+        if runtime.startswith("_"):
+            continue
+        where = f"roles.json: runtime_budget.{runtime}"
+        if runtime not in runtimes:
+            err(f"{where}: 존재하지 않는 runtime")
+            continue
+        threshold = budget.get("threshold_percent")
+        if not isinstance(threshold, (int, float)) or not 0 < threshold <= 100:
+            err(f"{where}: threshold_percent 가 0~100 범위의 숫자가 아님: {threshold!r}")
+        fallback = budget.get("fallback_profile")
+        if fallback not in roles.get("bindings", {}):
+            err(f"{where}: fallback_profile '{fallback}' 이 bindings 에 없음")
+        elif any((v or {}).get("runtime") == runtime
+                 for k, v in roles["bindings"][fallback].items()
+                 if not k.startswith("_") or k == "_default"):
+            err(f"{where}: fallback_profile '{fallback}' 이 여전히 '{runtime}' 를 쓴다 "
+                f"— 전환해도 사용량이 계속 늘어난다")
+
+    if roles.get("active_profile") not in roles.get("bindings", {}):
+        err(f"roles.json: active_profile '{roles.get('active_profile')}' 이 bindings 에 없음")
+    ok(f"roles.json — role {len(names)}개, 런타임 {len(runtimes)}개, "
+       f"프로파일 {len(roles.get('bindings', {}))}개 (active: {roles.get('active_profile')})")
+    return roles
+
+
+def lint_graphs(roles):
+    role_names = set((roles or {}).get("roles", {}))
+    runtimes = (roles or {}).get("runtimes", {})
+    graph_dir = os.path.join(HARNESS, "orchestration")
+    levels = LEVELS
+    for fname in sorted(os.listdir(graph_dir)):
+        if not fname.endswith(".json"):
+            continue
+        g = load(os.path.join(graph_dir, fname))
+        nodes = {n["id"]: n for n in g.get("nodes", [])}
+        max_req = 0
+        for nid, n in nodes.items():
+            where = f"{fname}#{nid}"
+            if n["role"] not in role_names:
+                err(f"{where}: 존재하지 않는 role '{n['role']}'")
+            if "model" in n:
+                err(f"{where}: 폐기된 'model' 필드 — runtime/tier 두 축으로 분리됐습니다 "
+                    f"(docs/decisions/0002-llm-runtime-routing.md)")
+            if "runtime" not in n or "tier" not in n:
+                err(f"{where}: runtime / tier 필드 누락 — 바인딩 위임이면 명시적으로 null")
+            fanout = n.get("fanout")
+            if fanout:
+                if not fanout.get("role_from"):
+                    err(f"{where}: fanout 에 role_from 없음 — 복제된 노드의 role 이 미정의가 된다")
+                if not fanout.get("roles"):
+                    err(f"{where}: fanout 에 roles(후보 목록) 없음 — 라우팅을 정적으로 검증할 수 없다")
+                for cand in fanout.get("roles", []):
+                    if cand not in role_names:
+                        err(f"{where}: fanout.roles 가 존재하지 않는 role '{cand}' 를 참조")
+            if roles:
+                expected = expected_routing(roles, n)
+                if expected is None:
+                    err(f"{where}: 라우팅 해석 실패 — 바인딩을 확인하세요")
+                elif "_routing" not in n:
+                    warn(f"{where}: _routing 주석 없음 — `harness graph --sync` 로 채우세요")
+                elif n["_routing"] != expected:
+                    warn(f"{where}: _routing 이 현재 바인딩과 불일치 (stale) "
+                         f"— `harness graph --sync` 로 갱신하세요")
+            override = {k: n.get(k) for k in ("runtime", "tier")}
+            if any(v is not None for v in override.values()):
+                if None in override.values():
+                    err(f"{where}: runtime/tier override 는 한쪽만 지정할 수 없음: {override}")
+                else:
+                    lint_binding_value(where, override, runtimes)
+            if n.get("requires") not in levels:
+                err(f"{where}: requires 값이 잘못됨: {n.get('requires')}")
+            else:
+                max_req = max(max_req, levels[n["requires"]])
+            contract = n.get("output_contract")
+            if contract and not os.path.exists(os.path.join(HARNESS, contract)):
+                err(f"{where}: output_contract 파일 없음: {contract}")
+            for dep in n.get("inputs", []):
+                if dep not in nodes:
+                    err(f"{where}: inputs 가 존재하지 않는 노드 '{dep}' 를 참조")
+            if "retry" not in n or "on_failure" not in n or "timeout_sec" not in n:
+                err(f"{where}: retry / on_failure / timeout_sec 중 누락")
+            loopback = (n.get("retry") or {}).get("to")
+            loopback = [loopback] if isinstance(loopback, str) else (loopback or [])
+            for target in loopback:
+                if target not in nodes:
+                    err(f"{where}: retry.to 가 존재하지 않는 노드 '{target}' 를 참조")
+            if "verdict_request_changes" in (n.get("retry") or {}).get("on", []) and not loopback:
+                warn(f"{where}: verdict_request_changes 재시도인데 retry.to(재작업 대상)가 없음 "
+                     f"— 같은 노드만 다시 돌게 된다")
+        # 순환 검사
+        state = {}
+        def visit(nid, stack):
+            if state.get(nid) == "done":
+                return
+            if nid in stack:
+                err(f"{fname}: DAG 순환 — {' → '.join(stack[stack.index(nid):] + [nid])}")
+                return
+            for dep in nodes.get(nid, {}).get("inputs", []):
+                if dep in nodes:
+                    visit(dep, stack + [nid])
+            state[nid] = "done"
+        for nid in nodes:
+            visit(nid, [])
+        declared = levels.get(g.get("requires"), -1)
+        if declared != max_req:
+            warn(f"{fname}: 그래프 requires={g.get('requires')} 인데 노드 최대치는 "
+                 f"{[k for k, v in levels.items() if v == max_req][0]}")
+        ok(f"{fname} — 노드 {len(nodes)}개, 순환 없음")
+
+
+def lint_agents(roles):
+    """roles.json 이 참조하는 agent 는 모델을 스스로 정하지 않는다 — roles.json 이 SSOT."""
+    owned = 0
+    for role, spec in (roles or {}).get("roles", {}).items():
+        path = os.path.join(HARNESS, "agents", spec["agent"] + ".md")
+        model = fm_value(frontmatter(path), "model")
+        if model:
+            err(f"agents/{spec['agent']}.md: frontmatter 에 model: {model} — "
+                f"roles.json 이 모델을 소유한다 (role '{role}'). 이 줄을 제거하세요")
+        else:
+            owned += 1
+    ok(f"agents — roles.json 소유 {owned}개, frontmatter 모델 선언 없음")
+
+
+def lint_skills(roles):
+    """하네스가 소유한 스킬(private-*)은 requires·roles 를 선언하고,
+    구체 agent 를 직접 호출하지 않는다 — 호출은 roles.json 바인딩을 거친다."""
+    role_names = set((roles or {}).get("roles", {}))
+    checked = 0
+    targets = []
+    skills_dir = os.path.join(HARNESS, "skills")
+    for name in sorted(os.listdir(skills_dir)):
+        path = os.path.join(skills_dir, name, "SKILL.md")
+        if name.startswith("private-") and os.path.exists(path):
+            targets.append((f"skills/{name}", path))
+    commands_dir = os.path.join(HARNESS, "commands")
+    for name in sorted(os.listdir(commands_dir)):
+        if name.startswith("private-") and name.endswith(".md"):
+            targets.append((f"commands/{name}", os.path.join(commands_dir, name)))
+
+    for label, path in targets:
+        checked += 1
+        block = frontmatter(path)
+        with open(path, errors="ignore") as f:
+            body = f.read()
+        direct = re.findall(r"Agent\((private-[a-z-]+)", body)
+        if direct:
+            err(f"{label}: 구체 agent 직접 호출 {len(direct)}건 "
+                f"({', '.join(sorted(set(direct))[:3])}…) — role 참조로 바꾸세요 "
+                f"(`harness role <role>` 의 invoke 사용)")
+        for bad in re.findall(r"(?<!~/\.harness/)(?<!\$HARNESS/)\bbin/harness\b", body):
+            err(f"{label}: `bin/harness` 상대경로 호출 — 스킬은 프로젝트 cwd 에서 실행되므로 "
+                f"`~/.harness/bin/harness` 로 적으세요")
+            break
+        requires = fm_value(block, "requires")
+        if requires not in LEVELS:
+            err(f"{label}: frontmatter requires 미선언 또는 잘못됨: {requires} "
+                f"— 강등 사다리가 작동하지 않는다")
+        declared = fm_list(block, "roles")
+        if not declared:
+            err(f"{label}: frontmatter roles 미선언 — 어느 role 을 쓰는지 정적으로 알 수 없다")
+        for name in declared:
+            if name not in role_names:
+                err(f"{label}: frontmatter roles 가 존재하지 않는 role '{name}' 을 참조")
+        if requires in LEVELS and declared:
+            need = max((LEVELS[(roles["roles"].get(n) or {}).get("requires", "L0")]
+                        for n in declared if n in role_names), default=0)
+            if LEVELS[requires] < need:
+                warn(f"{label}: requires={requires} 인데 사용 role 의 최대 요구는 "
+                     f"{[k for k, v in LEVELS.items() if v == need][0]}")
+    ok(f"skills·commands — 하네스 소유 {checked}개 점검")
+
+
+def lint_secrets():
+    """정의 파일에 평문 시크릿을 두지 않는다 — policy.json 은 ${secrets.KEY} 로만 참조한다."""
+    policy = load("policy.json") or {}
+    bad = []
+    for key, value in (policy.get("env") or {}).items():
+        v = str(value)
+        if re.fullmatch(r"\$\{secrets\.[A-Za-z0-9_]+\}", v):
+            continue
+        looks_secret = (re.search(r"(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)", key, re.I)
+                        and len(v) >= 16)
+        if looks_secret:
+            bad.append(key)
+    for key in bad:
+        err(f"policy.json: env.{key} 에 평문 시크릿 — ${{secrets.{key}}} 로 바꾸고 "
+            f"실제 값은 secrets.local.json(gitignore)에 두세요")
+    store = os.path.join(HARNESS, "secrets.local.json")
+    if os.path.exists(store):
+        code, _ = _sh("git check-ignore -q secrets.local.json")
+        if code != 0:
+            err("secrets.local.json 이 gitignore 대상이 아님 — 커밋되면 시크릿이 샌다")
+    if not bad:
+        ok("secrets — 정의 파일에 평문 시크릿 없음")
+
+
+def lint_readmes():
+    """registry 디렉토리는 README 로 자기 목록을 갖고, 목록은 실제 파일과 일치해야 한다.
+
+    카운트·목록을 여러 문서에 수동 동기화하면 반드시 드리프트한다. 카운트 SSOT 는
+    각 디렉토리 README 이고, 상위 문서(HARNESS·capabilities)는 숫자를 박지 않는다.
+    commands/ 는 예외 — `commands/*.md` 가 전부 슬래시 커맨드로 등록돼 README 를 두면
+    `/README` 커맨드가 생긴다. 인덱스는 skills/README.md 가 대신 갖는다.
+    """
+    registries = {
+        "rules": lambda d: [f for f in os.listdir(d) if f.endswith(".md") and f != "README.md"],
+        "agents": lambda d: [f for f in os.listdir(d) if f.endswith(".md") and f != "README.md"],
+        "hooks": lambda d: [f for f in os.listdir(d) if f.endswith(".sh")],
+        "skills": lambda d: [f for f in os.listdir(d)
+                             if os.path.exists(os.path.join(d, f, "SKILL.md"))],
+        "contracts": lambda d: [f for f in os.listdir(d) if f.endswith(".json")],
+        "orchestration": lambda d: [f for f in os.listdir(d) if f.endswith(".json")],
+    }
+    checked = 0
+    for name, lister in registries.items():
+        d = os.path.join(HARNESS, name)
+        readme = os.path.join(d, "README.md")
+        if not os.path.exists(readme):
+            err(f"{name}/README.md 없음 — registry 디렉토리는 자기 목록을 가져야 한다")
+            continue
+        body = open(readme, errors="ignore").read()
+        items = sorted(lister(d))
+        missing = []
+        for item in items:
+            stem = item[:-3] if item.endswith(".md") else item
+            # 이름 경계로만 인정 — substring 오탐 방지
+            # (custom-develop 미등재인데 custom-develop-orchestrator 행에 걸리는 종류)
+            if not re.search(rf"(?<![A-Za-z0-9_-]){re.escape(stem)}(?![A-Za-z0-9_-])", body):
+                missing.append(item)
+        if missing:
+            err(f"{name}/README.md 목록 누락 {len(missing)}건: "
+                f"{', '.join(missing[:5])}{' …' if len(missing) > 5 else ''}")
+        else:
+            checked += 1
+    # 상위 문서의 가변 카운트 하드코딩 금지
+    countable = r"(스킬|에이전트|훅|규칙|게이트|role|노드|계약)\s*\d+\s*개|\d+\s*개의?\s*(스킬|에이전트|훅|규칙)"
+    for doc in ("HARNESS.md", "capabilities.md", "docs/ssot-map.md", "docs/onboarding.md"):
+        path = os.path.join(HARNESS, doc)
+        if not os.path.exists(path):
+            continue
+        for m in re.finditer(countable, open(path, errors="ignore").read()):
+            warn(f"{doc}: 가변 카운트 하드코딩 '{m.group(0)}' — 카운트 SSOT 는 각 디렉토리 README")
+    ok(f"registry README — {checked}/{len(registries)}개 목록 일치")
+
+
+def lint_agent_sections(roles):
+    """roles.json 이 부르는 에이전트는 역할 경계·출력 형식을 갖는다."""
+    required = ("## 역할 경계", "## 출력 형식")
+    bad = 0
+    for role, spec in (roles or {}).get("roles", {}).items():
+        path = os.path.join(HARNESS, "agents", spec["agent"] + ".md")
+        if not os.path.exists(path):
+            continue
+        body = open(path, errors="ignore").read()
+        for section in required:
+            if section not in body:
+                err(f"agents/{spec['agent']}.md: 필수 섹션 '{section}' 없음 (role '{role}')")
+                bad += 1
+    if not bad:
+        ok("agents 필수 섹션 — 역할 경계·출력 형식 전부 존재")
+
+
+def lint_gates():
+    policy = load("policy.json")
+    if not policy:
+        return err("policy.json 없음")
+    registered = set()
+    for gate in policy.get("gates", []):
+        script = os.path.join(HARNESS, gate["script"])
+        registered.add(os.path.basename(gate["script"]))
+        if not os.path.exists(script):
+            err(f"policy.gates '{gate['id']}': 스크립트 없음 {gate['script']}")
+        elif not os.access(script, os.X_OK):
+            err(f"policy.gates '{gate['id']}': 실행 권한 없음 {gate['script']}")
+        if gate["enforcement"] in ("blocking", "ask") and not gate.get("fallback"):
+            warn(f"policy.gates '{gate['id']}': {gate['enforcement']} 인데 fallback(절차 강제 경로) 미정의")
+        if gate["enforcement"] not in ("blocking", "ask", "advisory"):
+            err(f"policy.gates '{gate['id']}': enforcement 값이 잘못됨")
+    hooks_dir = os.path.join(HARNESS, "hooks")
+    for fname in sorted(os.listdir(hooks_dir)):
+        if fname.endswith(".sh") and fname not in registered:
+            warn(f"고아 훅 — hooks/{fname} 이 policy.gates 에 등록되지 않음")
+    blocking = sum(1 for g in policy["gates"] if g["enforcement"] == "blocking")
+    ok(f"policy.json — 게이트 {len(policy['gates'])}개 (blocking {blocking})")
+
+
+def lint_rules():
+    """규칙은 frontmatter 로 자기 적용 범위를 선언한다 — 선택 로드의 기계적 근거."""
+    ids, always = {}, 0
+    for r in load_rules():
+        fname = os.path.basename(r["file"])
+        stem = fname[:-3]
+        if not r["id"]:
+            err(f"{r['file']}: frontmatter id 없음 — 선택 로드의 키다")
+            continue
+        # `00-` 같은 로드 순서 접두는 id 에서 뺀다
+        if r["id"] != re.sub(r"^\d+-", "", stem):
+            err(f"{r['file']}: id '{r['id']}' 가 파일명 '{stem}' 과 다름")
+        if r["id"] in ids:
+            err(f"rules: id 중복 '{r['id']}' — {ids[r['id']]} vs {fname}")
+        ids[r["id"]] = fname
+        if not r["title"]:
+            warn(f"{r['file']}: title 없음")
+        if r["scope"] not in RULE_SCOPES:
+            err(f"{r['file']}: scope 값이 잘못됨: {r['scope']} (허용: {'/'.join(RULE_SCOPES)})")
+        if r["level"] not in RULE_LEVELS:
+            err(f"{r['file']}: level 값이 잘못됨: {r['level']} (허용: {'/'.join(RULE_LEVELS)})")
+        if r["context"] not in RULE_CONTEXTS:
+            err(f"{r['file']}: context 값이 잘못됨: {r['context']} "
+                f"(허용: {'/'.join(RULE_CONTEXTS)})")
+        if r["scope"] == "always":
+            always += 1
+        elif not r["paths"]:
+            pass  # 절차형 규칙 — 파일 glob 이 없을 수 있다
+    ok(f"rules — {len(ids)}개 (always {always}개, paths 선언 "
+       f"{sum(1 for r in load_rules() if r['paths'])}개)")
+
+
+# ── 멀티에이전트 실행 계층 ────────────────────────────────────────────────────
+ACCESS_LEVELS = ("read-only", "workspace-write", "full")
+REVIEWER_ROLES = ("prd.review", "design.review", "review.code", "review.infra")
+
+
+def load_runner(name):
+    """orchestration/runner/<name>.py 를 모듈로 로드한다. 없으면 None.
+
+    `.pyc` 를 남기지 않는다 — `__pycache__` 의 컴파일 산출물은 소스 절대경로를 품어서
+    "머신 절대경로 비의존" rubric 검사를 깨뜨린다 (gitignore 돼도 파일시스템에는 남는다).
+    """
+    import importlib.machinery, importlib.util
+    prior = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    path = os.path.join(HARNESS, "orchestration/runner", f"{name}.py")
+    if not os.path.isfile(path):
+        return None
+    mod_name = f"harness_runner_{name}"
+    spec = importlib.util.spec_from_loader(
+        mod_name, importlib.machinery.SourceFileLoader(mod_name, path))
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prior
+    return mod
+
+
+def lint_multiagent(roles):
+    """실행 계층 정합 — 어댑터↔런타임 · 접근 등급 · 교차 검증 강제."""
+    ad = load_runner("adapter")
+    if not ad:
+        return err("orchestration/runner/adapter.py 가 없습니다 — 실행 계층 미설치")
+    try:
+        adapters = ad.load_adapters()
+    except Exception as e:  # noqa: BLE001
+        return err(f"어댑터 로드 실패: {e}")
+
+    runtimes = roles.get("runtimes") or {}
+    role_defs = roles.get("roles") or {}
+
+    # 어댑터 id 는 roles.json#runtimes 의 키여야 한다 — 아니면 노드가 그 런타임을 못 쓴다.
+    for name in adapters:
+        if name not in runtimes:
+            err(f"어댑터 '{name}' 이 roles.json#runtimes 에 없습니다")
+    # host 는 현재 세션 런타임이라 부를 subprocess 가 없다 — 디스패처 대상이 아니다.
+    for name in runtimes:
+        if name != "host" and name not in adapters:
+            warn(f"런타임 '{name}' 에 어댑터가 없습니다 — 디스패처로 실행할 수 없습니다")
+
+    # 접근 등급이 어댑터 [access] 에 실재하는가
+    for role_name, spec in role_defs.items():
+        access = ((spec.get("exec") or {}).get("access"))
+        if not access:
+            err(f"role '{role_name}': exec.access 가 없습니다")
+            continue
+        if access not in ACCESS_LEVELS:
+            err(f"role '{role_name}': 알 수 없는 접근 등급 '{access}' "
+                f"(허용: {list(ACCESS_LEVELS)})")
+            continue
+        for name, adapter in adapters.items():
+            if access not in (adapter.get("access") or {}):
+                err(f"어댑터 '{name}': 접근 등급 '{access}' 번역이 없습니다 "
+                    f"(role '{role_name}' 이 요구)")
+
+    # 리뷰 role 이 쓰기 권한을 들면 자기가 검증할 대상을 고칠 수 있다.
+    for role_name in REVIEWER_ROLES:
+        spec = role_defs.get(role_name)
+        if spec and (spec.get("exec") or {}).get("access") != "read-only":
+            err(f"role '{role_name}': 리뷰 role 은 read-only 여야 합니다 "
+                f"(현재 {(spec.get('exec') or {}).get('access')})")
+
+    # 교차 검증 — 검증자와 피검증자가 같은 런타임이면 같은 맹점을 공유한다.
+    # 관례로만 두면 프로파일을 편집할 때 조용히 깨진다.
+    for profile_name, binding in (roles.get("bindings") or {}).items():
+        if binding.get("_cross_review_exempt"):
+            if not binding.get("_exempt_reason"):
+                err(f"프로파일 '{profile_name}': _cross_review_exempt 에 _exempt_reason 이 없습니다")
+            continue
+        for role_name, spec in role_defs.items():
+            for target in spec.get("verifies") or []:
+                if target not in role_defs:
+                    err(f"role '{role_name}': verifies 대상 '{target}' role 이 없습니다")
+                    continue
+                left = resolve_routing(roles, role_name, None, profile_name)
+                right = resolve_routing(roles, target, None, profile_name)
+                if left["runtime"] == right["runtime"]:
+                    err(f"프로파일 '{profile_name}' · role '{role_name}': 검증 대상 "
+                        f"'{target}' 과 runtime 이 같습니다 ('{left['runtime']}') — "
+                        f"검증자와 피검증자가 맹점을 공유합니다")
+    # 노드에 prompt 가 없으면 디스패처가 일반 문구로 떨어져 아무 근거 없이 돈다.
+    graph_dir = os.path.join(HARNESS, "orchestration")
+    graph_count = 0
+    for name in sorted(os.listdir(graph_dir)) if os.path.isdir(graph_dir) else []:
+        if not name.endswith(".json"):
+            continue
+        graph = load(f"orchestration/{name}") or {}
+        for node in graph.get("nodes") or []:
+            prompt = node.get("prompt") or ""
+            if not prompt.strip():
+                err(f"orchestration/{name}: 노드 '{node.get('id')}' 에 prompt 가 없습니다 "
+                    "— 디스패처가 과업 없이 실행합니다")
+                continue
+            # 리터럴 백슬래시-n 은 줄바꿈으로 렌더되지 않는다. 프롬프트가 한 줄로 뭉쳐
+            # 섹션 구분이 사라지는데 오류는 안 나므로 조용히 품질만 떨어진다.
+            if "\\n" in prompt:
+                err(f"orchestration/{name}: 노드 '{node.get('id')}' prompt 에 리터럴 "
+                    "'\\n' 이 있습니다 — 실제 줄바꿈으로 바꾸세요")
+        graph_count += 1
+
+    if not errors:
+        ok(f"멀티에이전트 — 어댑터 {len(adapters)}개, 그래프 {graph_count}개, 교차 검증 "
+           f"{sum(len(s.get('verifies') or []) for s in role_defs.values())}쌍")
+
+
+def cmd_lint(args):
+    roles = lint_roles()
+    lint_graphs(roles)
+    lint_multiagent(roles)
+    lint_agents(roles)
+    lint_agent_sections(roles)
+    lint_skills(roles)
+    lint_readmes()
+    lint_secrets()
+    lint_gates()
+    lint_rules()
+    print()
+    print(f"오류 {len(errors)} / 경고 {len(warns)}")
+    return 1 if errors else 0
+
+
+# ── rules 인덱스 ──────────────────────────────────────────────────────────────
+RULE_SCOPES = ("always", "task")
+RULE_LEVELS = ("MUST", "SHOULD")
+RULE_CONTEXTS = ("common", "private", "company")
+
+
+def glob_match(pattern, path):
+    """`**/`(0개 이상 디렉토리) · `*`(구분자 제외) 를 지원하는 glob 매칭."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(out), path.lstrip("./")) is not None
+
+
+def load_rules():
+    """rules/*.md 의 frontmatter 인덱스. README 는 제외."""
+    rules_dir = os.path.join(HARNESS, "rules")
+    index = []
+    for fname in sorted(os.listdir(rules_dir)):
+        if not fname.endswith(".md") or fname == "README.md":
+            continue
+        block = frontmatter(os.path.join(rules_dir, fname))
+        paths = re.findall(r'^\s*-\s*"(.+?)"\s*$', block, re.M)
+        index.append({
+            "file": f"rules/{fname}",
+            "id": fm_value(block, "id"),
+            "title": fm_value(block, "title"),
+            "scope": fm_value(block, "scope"),
+            "level": fm_value(block, "level"),
+            "context": fm_value(block, "context"),
+            "paths": paths,
+        })
+    return index
+
+
+def cmd_rules(args):
+    """주어진 파일에 적용되는 규칙을 산출한다 — 전량 로드를 막는 근거."""
+    index = load_rules()
+    ctx = args[args.index("--context") + 1] if "--context" in args else None
+    targets = [a for a in args if not a.startswith("--")
+               and a != ctx]
+    if ctx:
+        index = [r for r in index if r["context"] in (ctx, "common")]
+
+    if not targets:
+        rows = index
+        header = f"전체 규칙 {len(rows)}개" + (f" (context={ctx})" if ctx else "")
+    else:
+        rows = [r for r in index
+                if r["scope"] == "always"
+                or any(glob_match(p, t) for p in r["paths"] for t in targets)]
+        header = f"{len(targets)}개 경로에 적용되는 규칙 {len(rows)}개"
+
+    if "--json" in args:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    print(header)
+    for r in rows:
+        why = "always" if r["scope"] == "always" else (
+            ", ".join(p for p in r["paths"]
+                      if any(glob_match(p, t) for t in targets)) if targets else
+            ", ".join(r["paths"]) or "—")
+        print(f"  {r['level']:<6} {r['context']:<8} {r['id']:<30} {r['file']}")
+        print(f"         ↳ {why}")
+    if targets:
+        info("이 목록만 로드한다 — 전량 로드는 컨텍스트 예산을 태운다 (core-directives §3)")
+    return 0
+
+
+# ── 계약 검증 ─────────────────────────────────────────────────────────────────
+def validate_schema(schema, data, where="$"):
+    """외부 의존성 없는 JSON Schema 부분집합 검증기.
+
+    지원: type / required / properties / additionalProperties:false / enum /
+          pattern / minLength / minItems / minimum / maximum / uniqueItems / items.
+    미지원 문법(anyOf·$ref 등)은 조용히 통과시킨다 — 쓰지 않는 문법이다.
+    """
+    out = []
+    types = {"object": dict, "array": list, "string": str, "boolean": bool,
+             "integer": int, "number": (int, float)}
+    expected = schema.get("type")
+    if expected in types:
+        if expected == "integer" and isinstance(data, bool):
+            return [f"{where}: boolean 은 integer 가 아니다"]
+        if not isinstance(data, types[expected]):
+            return [f"{where}: type 이 {expected} 가 아님 (실제 {type(data).__name__})"]
+    if "enum" in schema and data not in schema["enum"]:
+        out.append(f"{where}: enum 위반 — {data!r} (허용: {'/'.join(map(str, schema['enum']))})")
+    if isinstance(data, str):
+        if "minLength" in schema and len(data) < schema["minLength"]:
+            out.append(f"{where}: minLength {schema['minLength']} 미달 (실제 {len(data)})")
+        if "pattern" in schema and not re.search(schema["pattern"], data):
+            out.append(f"{where}: pattern 불일치 — {data!r} vs /{schema['pattern']}/")
+    if isinstance(data, (int, float)) and not isinstance(data, bool):
+        if "minimum" in schema and data < schema["minimum"]:
+            out.append(f"{where}: minimum {schema['minimum']} 미달 (실제 {data})")
+        if "maximum" in schema and data > schema["maximum"]:
+            out.append(f"{where}: maximum {schema['maximum']} 초과 (실제 {data})")
+    if isinstance(data, list):
+        if "minItems" in schema and len(data) < schema["minItems"]:
+            out.append(f"{where}: minItems {schema['minItems']} 미달 (실제 {len(data)})")
+        if schema.get("uniqueItems"):
+            seen = [json.dumps(x, sort_keys=True) for x in data]
+            if len(set(seen)) != len(seen):
+                out.append(f"{where}: uniqueItems 위반 (중복 항목)")
+        if isinstance(schema.get("items"), dict):
+            for i, item in enumerate(data):
+                out += validate_schema(schema["items"], item, f"{where}[{i}]")
+    if isinstance(data, dict):
+        for key in schema.get("required", []):
+            if key not in data:
+                out.append(f"{where}: 필수 필드 누락 — {key}")
+        props = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            for key in data:
+                if key not in props:
+                    out.append(f"{where}: 허용되지 않은 필드 — {key}")
+        for key, sub in props.items():
+            if key in data:
+                out += validate_schema(sub, data[key], f"{where}.{key}")
+    return out
+
+
+def semantic_checks(contract, data):
+    """스키마로 표현할 수 없는 하네스 규칙. 계약 위반과 같은 무게로 다룬다."""
+    out = []
+    name = os.path.basename(contract)
+    if name == "implementation-result.schema.json":
+        v = data.get("verification") or {}
+        if data.get("status") == "done":
+            if v.get("exit_code") != 0:
+                out.append("COMPLETION-RULE §2 위반: status=done 인데 verification.exit_code "
+                           f"= {v.get('exit_code')} (0 이어야 한다)")
+            if v.get("executed") is False:
+                out.append("COMPLETION-RULE §2 위반: 미실행(executed=false)인데 status=done "
+                           "— in-progress 로 보고해야 한다")
+            if not (v.get("artifact_path") or "").strip():
+                out.append("COMPLETION-RULE §1 위반: 검증 아티팩트 경로가 비어 있다")
+        tdd = data.get("tdd") or {}
+        if tdd.get("red_first") is False:
+            out.append("core-directives §1 위반: red_first=false — 테스트 우선이 아니다")
+        if tdd.get("red_first") and not (tdd.get("red_evidence") or "").strip():
+            out.append("core-directives §1: red_first=true 인데 red_evidence 가 없다 "
+                       "(실패 출력 또는 커밋 해시 필요)")
+    if name == "review-verdict.schema.json":
+        levels = {f.get("level") for f in data.get("findings", [])}
+        blocking = levels & {"p0", "p1", "p2"}
+        comment = levels & {"p3", "p4"}
+        verdict = data.get("verdict")
+        if blocking and verdict != "REQUEST_CHANGES":
+            out.append(f"verdict 불정합: {sorted(blocking)} 존재 → REQUEST_CHANGES 여야 함 (현재 {verdict})")
+        elif not blocking and comment and verdict != "COMMENT":
+            out.append(f"verdict 불정합: p3~p4 만 존재 → COMMENT 여야 함 (현재 {verdict})")
+        elif not levels and verdict != "APPROVED":
+            out.append(f"verdict 불정합: 발견 없음 → APPROVED 여야 함 (현재 {verdict})")
+        rv = data.get("reviewed") or {}
+        if rv.get("files_read", 0) < rv.get("files_changed", 0) and not rv.get("skipped"):
+            out.append(f"전수 Read 위반: 변경 {rv.get('files_changed')}개 중 "
+                       f"{rv.get('files_read')}개만 읽음 (skipped 사유도 없음)")
+    if name == "design-doc.schema.json":
+        tickets = {t["id"] for t in data.get("tickets", [])}
+        waved = [tid for w in data.get("waves", []) for tid in w.get("ticket_ids", [])]
+        missing = tickets - set(waved)
+        if missing:
+            out.append(f"wave 누락 티켓: {', '.join(sorted(missing))}")
+        unknown = set(waved) - tickets
+        if unknown:
+            out.append(f"wave 가 존재하지 않는 티켓을 참조: {', '.join(sorted(unknown))}")
+        widths = [len(w.get("ticket_ids", [])) for w in data.get("waves", [])]
+        if widths and max(widths) <= 2 and len(tickets) > 2:
+            out.append(f"private-ticket 위반: 모든 wave 너비가 1~2 (분포 {widths}) "
+                       f"— 직선형 DAG 는 분해 실패다. 재분해 전 구현 금지")
+        if "max_wave_width" in data and widths and data["max_wave_width"] != max(widths):
+            out.append(f"max_wave_width={data['max_wave_width']} 인데 실제 최대는 {max(widths)}")
+        # depends_on 과 wave 순서 정합 — 선행 티켓은 반드시 더 이른 wave 에 있어야 한다
+        wave_of = {tid: w.get("index") for w in data.get("waves", [])
+                   for tid in w.get("ticket_ids", [])}
+        for ticket in data.get("tickets", []):
+            mine = wave_of.get(ticket["id"])
+            for dep in ticket.get("depends_on", []):
+                theirs = wave_of.get(dep)
+                if mine is None or theirs is None:
+                    continue
+                if theirs >= mine:
+                    out.append(f"wave 순서 위반: {ticket['id']}(wave {mine}) 가 "
+                               f"{dep}(wave {theirs}) 에 의존 — 선행은 더 이른 wave 여야 한다")
+        # 같은 wave 안 파일 교집합 (Single Writer per File)
+        by_id = {t["id"]: t for t in data.get("tickets", [])}
+        for w in data.get("waves", []):
+            files = {}
+            for tid in w.get("ticket_ids", []):
+                for f in (by_id.get(tid) or {}).get("files_touched", []):
+                    files.setdefault(f, []).append(tid)
+            clash = {f: ids for f, ids in files.items() if len(ids) > 1}
+            if clash:
+                first = list(clash.items())[0]
+                out.append(f"Single Writer 위반 (wave {w.get('index')}): "
+                           f"{first[0]} ← {', '.join(first[1])}")
+    return out
+
+
+def validate_result(contract, data):
+    """계약 검증 결과 (스키마 + 의미 규칙) 오류 목록."""
+    schema = load(contract)
+    if schema is None:
+        return [f"계약 파일 없음: {contract}"]
+    return validate_schema(schema, data) + semantic_checks(contract, data)
+
+
+def cmd_validate(args):
+    if len(args) < 2:
+        print("사용법: harness validate <contract.json> <result.json|->")
+        return 2
+    contract, result_path = args[0], args[1]
+    data = json.load(sys.stdin) if result_path == "-" else load(result_path)
+    if data is None:
+        return err(f"결과 파일 없음: {result_path}") or 1
+    problems = validate_result(contract, data)
+    for p in problems:
+        err(p)
+    if problems:
+        print(f"\n계약 위반 {len(problems)}건 — {os.path.basename(contract)}")
+        return 1
+    ok(f"계약 통과 — {os.path.basename(contract)}")
+    return 0
+
+
+# ── role ─────────────────────────────────────────────────────────────────────
+def cmd_role(args):
+    roles = load("roles.json")
+    if not roles:
+        return err("roles.json 없음") or 1
+    profile = args[args.index("--profile") + 1] if "--profile" in args else roles["active_profile"]
+    if profile not in roles.get("bindings", {}):
+        return err(f"존재하지 않는 프로파일: {profile}") or 1
+    wanted = [a for a in args if not a.startswith("--") and a != profile] or sorted(roles["roles"])
+    as_json = "--json" in args
+    out = []
+    for name in wanted:
+        if name not in roles["roles"]:
+            err(f"존재하지 않는 role: {name}")
+            continue
+        r = resolve_routing(roles, name, None, profile)
+        if not r:
+            err(f"라우팅 해석 실패: {name}")
+            continue
+        r["requires"] = roles["roles"][name]["requires"]
+        r["access"] = (roles["roles"][name].get("exec") or {}).get("access")
+        r["invoke"] = invoke_command(r, roles=roles)
+        out.append(r)
+    if as_json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 1 if errors else 0
+    if "--compact" in args:
+        for r in out:
+            print(f"{r['role']:<18} {r['runtime'] + '/' + r['tier']:<11} {r['invoke']}")
+        return 1 if errors else 0
+    for r in out:
+        print(f"{r['role']}  ({r['requires']})")
+        print(f"  runtime : {r['runtime']}/{r['tier']}")
+        print(f"  model   : {r['model'] or '런타임 기본'}"
+              + (f"  effort={r['effort']}" if r.get("effort") else ""))
+        print(f"  agent   : agents/{r['agent']}.md")
+        print(f"  invoke  : {r['invoke']}")
+    return 1 if errors else 0
+
+
+# ── graph ────────────────────────────────────────────────────────────────────
+ROUTING_RE = re.compile(r'\n[ \t]*"_routing":[ \t]*(?:"[^"]*"|\[[^\]]*\]),')
+
+
+def sync_routing(path, expected_by_node):
+    """그래프 파일의 _routing 주석을 갱신한다. 손으로 맞춘 포맷을 보존하려고
+    json.dump 로 전체를 다시 쓰지 않고, 노드마다 tier 줄 뒤에 텍스트로 끼워 넣는다."""
+    text = ROUTING_RE.sub("", open(path).read())
+    out, idx = [], 0
+    order = list(expected_by_node.items())
+    for line in text.split("\n"):
+        out.append(line)
+        stripped = line.strip()
+        if stripped.startswith('"tier":') and idx < len(order):
+            indent = line[: len(line) - len(line.lstrip())]
+            value = order[idx][1]
+            idx += 1
+            if isinstance(value, list):
+                out.append(f'{indent}"_routing": [')
+                for i, item in enumerate(value):
+                    comma = "," if i < len(value) - 1 else ""
+                    out.append(f'{indent}  {json.dumps(item, ensure_ascii=False)}{comma}')
+                out.append(f'{indent}],')
+            else:
+                out.append(f'{indent}"_routing": {json.dumps(value, ensure_ascii=False)},')
+    open(path, "w").write("\n".join(out))
+    return idx
+
+
+def cmd_graph(args):
+    roles = load("roles.json")
+    if not roles:
+        return err("roles.json 없음") or 1
+    profile = args[args.index("--profile") + 1] if "--profile" in args else roles["active_profile"]
+    if profile not in roles.get("bindings", {}):
+        return err(f"존재하지 않는 프로파일: {profile}") or 1
+    sync = "--sync" in args
+    graph_dir = os.path.join(HARNESS, "orchestration")
+    targets = [a for a in args if a.endswith(".json")] or \
+              [os.path.join(graph_dir, f) for f in sorted(os.listdir(graph_dir)) if f.endswith(".json")]
+
+    print(f"프로파일: {profile}" + (" (active)" if profile == roles["active_profile"] else ""))
+    for path in targets:
+        g = load(path)
+        print(f"\n── {os.path.basename(path)} — 노드 {len(g['nodes'])}개 "
+              f"(requires {g.get('requires')}) ──")
+        header = f"{'노드':<14} {'role':<18} {'runtime/tier':<14} {'모델':<16} {'agent'}"
+        print(header)
+        print("-" * len(header))
+        expected_by_node = {}
+        for n in g["nodes"]:
+            expected_by_node[n["id"]] = expected_routing(roles, n, profile)
+            for i, role_name in enumerate(node_roles(n)):
+                r = resolve_routing(roles, role_name, n, profile)
+                if not r:
+                    err(f"{n['id']}: 라우팅 해석 실패 (role={role_name})")
+                    continue
+                model = r["model"] or "런타임 기본"
+                if r["effort"]:
+                    model += f"/{r['effort']}"
+                mark = "" if r["source"] == "profile" else " *"
+                gate = "  ⛔ 사용자 게이트" if i == 0 and n.get("gate") else ""
+                nid = n["id"] if i == 0 else ""
+                print(f"{nid:<14} {role_name:<18} {r['runtime'] + '/' + r['tier']:<14} "
+                      f"{model:<16} {r['agent']}{mark}{gate}")
+        if sync:
+            count = sync_routing(path, expected_by_node)
+            ok(f"_routing {count}개 갱신 — {os.path.basename(path)}")
+    if not sync:
+        info("\n* = 노드 override (프로파일 바인딩이 아님)")
+        info("그래프의 _routing 주석을 갱신하려면: harness graph --sync")
+    return 1 if errors else 0
+
+
+# ── run (그래프 실행 상태 기계) ────────────────────────────────────────────────
+RUNS = os.path.join(HARNESS, "runs")
+
+
+def run_dir(run_id):
+    return os.path.join(RUNS, run_id)
+
+
+def save_state(state):
+    path = os.path.join(run_dir(state["run_id"]), "state.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def journal(state, event, **fields):
+    path = os.path.join(run_dir(state["run_id"]), "journal.jsonl")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps({"ts": now_iso(), "event": event, **fields},
+                           ensure_ascii=False) + "\n")
+
+
+def now_iso():
+    import datetime
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def latest_run():
+    if not os.path.isdir(RUNS):
+        return None
+    runs = [d for d in os.listdir(RUNS) if os.path.exists(os.path.join(RUNS, d, "state.json"))]
+    return sorted(runs)[-1] if runs else None
+
+
+def load_state(run_id=None):
+    run_id = run_id or latest_run()
+    if not run_id:
+        return None
+    return load(os.path.join(run_dir(run_id), "state.json"))
+
+
+def node_result(state, nid):
+    return load(os.path.join(run_dir(state["run_id"]), nid.replace("/", "_"), "result.json"))
+
+
+def expand_fanout(state, graph_nodes):
+    """fanout 노드의 선행 산출물이 준비되면 자식 노드로 복제한다."""
+    changed = False
+    for nid, spec in graph_nodes.items():
+        fan = spec.get("fanout")
+        node = state["nodes"].get(nid)
+        if not fan or not node or node.get("children") is not None:
+            continue
+        src = fan.get("from")
+        if state["nodes"].get(src, {}).get("status") != "completed":
+            continue
+        result = node_result(state, src) or {}
+        items = result.get(fan.get("key")) or []
+        key = fan.get("role_from")
+        children = []
+        for i, item in enumerate(items):
+            role = item.get(key) if isinstance(item, dict) else None
+            if role not in (fan.get("roles") or []):
+                err(f"{nid}: 티켓 {i} 의 role '{role}' 이 fanout.roles 에 없다")
+                continue
+            child = f"{nid}[{item.get('id', i)}]"
+            children.append(child)
+            # 티켓 DAG 를 그대로 노드 의존으로 옮긴다 — depends_on 을 무시하면
+            # wave 순서가 사라져 선행 티켓 없이 후행이 열린다
+            deps = [f"{nid}[{d}]" for d in (item.get("depends_on") or [])]
+            state["nodes"][child] = {"status": "pending", "attempts": 0, "role": role,
+                                     "parent": nid, "inputs": [src] + deps, "gate": None,
+                                     "degraded": None}
+        node["children"] = children
+        node["status"] = "expanded"
+        changed = True
+        journal(state, "fanout", node=nid, children=len(children))
+    # 부모는 자식 전원이 끝나면 완료
+    for nid, node in state["nodes"].items():
+        if node.get("children") and node["status"] == "expanded":
+            if all(state["nodes"][c]["status"] == "completed" for c in node["children"]):
+                node["status"] = "completed"
+                changed = True
+                journal(state, "fanout-complete", node=nid)
+    return changed
+
+
+def ready_nodes(state, graph_nodes):
+    out = []
+    for nid, node in state["nodes"].items():
+        if node["status"] != "pending":
+            continue
+        inputs = node.get("inputs", graph_nodes.get(nid, {}).get("inputs", []))
+        blocked = False
+        for dep in inputs:
+            dep_node = state["nodes"].get(dep, {})
+            if dep_node.get("status") != "completed":
+                blocked = True
+                break
+        if not blocked:
+            out.append(nid)
+    return out
+
+
+def base_spec(graph_nodes, nid):
+    """자식 노드는 부모 스펙을 상속한다."""
+    return graph_nodes.get(nid.split("[")[0], {})
+
+
+def check_budget(state, roles, ready, graph_nodes):
+    """대기 노드가 쓸 런타임의 사용량이 상한을 넘으면 전환 게이트를 연다.
+
+    게이트가 열려 있는 동안 디스패치를 막는다 (반환 True). 이미 완료된 노드는
+    건드리지 않는다 — 남은 노드만 fallback 프로파일로 넘어간다.
+    """
+    gate = state.get("budget_gate") or {}
+    if gate.get("status") == "pending":
+        return True
+    needed = set()
+    for nid in ready:
+        spec = base_spec(graph_nodes, nid)
+        role = state["nodes"].get(nid, {}).get("role") or spec.get("role")
+        routing = resolve_routing(roles, role, spec, state.get("profile"))
+        if routing:
+            needed.add(routing["runtime"])
+    for runtime in sorted(needed):
+        policy = budget_policy(roles, runtime)
+        if not policy:
+            continue
+        usage = runtime_usage(runtime)
+        if not usage or usage.get("stale"):
+            continue
+        threshold = policy.get("threshold_percent", 80)
+        if usage["percent"] < threshold:
+            continue
+        if gate.get("status") == "declined" and gate.get("runtime") == runtime:
+            # 한 번 반려한 뒤 같은 사용량으로 매번 다시 묻지 않는다
+            step = policy.get("re_ask_percent_step", 5)
+            if usage["percent"] < gate.get("percent", 0) + step:
+                continue
+        state["budget_gate"] = {
+            "runtime": runtime, "percent": usage["percent"], "threshold": threshold,
+            "window_minutes": usage.get("window_minutes"), "resets_at": usage.get("resets_at"),
+            "source": usage.get("source"), "observed_at": usage.get("observed_at"),
+            "from_profile": state.get("profile"),
+            "to_profile": policy.get("fallback_profile"), "status": "pending"}
+        journal(state, "budget-exceeded", runtime=runtime, percent=usage["percent"],
+                threshold=threshold, to_profile=policy.get("fallback_profile"))
+        if not policy.get("gate", True):
+            resolve_budget_gate(state, roles, approve=True)
+            return False
+        save_state(state)
+        return True
+    return False
+
+
+def resolve_budget_gate(state, roles, approve):
+    """예산 게이트 승인(프로파일 전환) / 반려(현행 유지). 처리했으면 True."""
+    gate = state.get("budget_gate") or {}
+    if gate.get("status") != "pending":
+        return False
+    gate["decided_at"] = now_iso()
+    if approve:
+        gate["status"] = "approved"
+        state["profile"] = gate["to_profile"]
+        journal(state, "budget-switch", runtime=gate["runtime"], percent=gate["percent"],
+                from_profile=gate.get("from_profile"), to_profile=gate["to_profile"])
+        ok(f"프로파일 전환: {gate.get('from_profile')} → {gate['to_profile']} "
+           f"({gate['runtime']} 사용량 {gate['percent']}% ≥ {gate['threshold']}%)")
+        info("완료된 노드는 그대로 두고, 남은 노드부터 새 프로파일로 해석됩니다")
+    else:
+        gate["status"] = "declined"
+        journal(state, "budget-declined", runtime=gate["runtime"], percent=gate["percent"])
+        warn(f"전환 반려 — {gate['runtime']} 를 계속 사용합니다 "
+             f"(사용량이 더 오르면 다시 묻습니다)")
+    save_state(state)
+    return True
+
+
+def print_next(state, graph, roles):
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    expand_fanout(state, graph_nodes)
+    save_state(state)
+    ready = ready_nodes(state, graph_nodes)
+    if check_budget(state, roles, ready, graph_nodes):
+        gate = state["budget_gate"]
+        print(f"{YEL}⛔ 런타임 예산 게이트{RST}: "
+              f"{usage_line(gate, {'threshold_percent': gate['threshold']})}")
+        print(f"   남은 노드를 '{gate['to_profile']}' 프로파일로 전환할지 결정이 필요합니다 "
+              f"(전환 시 {gate['runtime']} 노드가 전부 claude 로 넘어갑니다)")
+        print("   승인: harness run budget --approve   /  유지: harness run budget --reject")
+        return
+    waiting = [nid for nid, n in state["nodes"].items() if n["status"] == "awaiting-gate"]
+    if waiting:
+        print(f"{YEL}⛔ 사용자 게이트 대기{RST}: {', '.join(waiting)}")
+        for nid in waiting:
+            print(f"   승인: harness run gate {nid} --approve   /  반려: --reject \"<사유>\"")
+    if not ready:
+        done = sum(1 for n in state["nodes"].values() if n["status"] == "completed")
+        total = len(state["nodes"])
+        if not waiting:
+            print(f"실행 가능한 노드 없음 — 완료 {done}/{total}"
+                  + ("  (전부 완료)" if done == total else "  (실패·차단 확인: harness run status)"))
+        return
+    print(f"실행 가능 ({len(ready)}개 — 동시 실행 가능):")
+    for nid in ready:
+        spec = base_spec(graph_nodes, nid)
+        node = state["nodes"][nid]
+        role = node.get("role") or spec.get("role")
+        r = resolve_routing(roles, role, spec, state["profile"])
+        out_dir = os.path.join("runs", state["run_id"], nid.replace("/", "_"))
+        print(f"\n  {nid}  (role {role}, 시도 {node['attempts'] + 1}/"
+              f"{spec.get('retry', {}).get('max', 0) + 1})")
+        if node.get("degraded"):
+            print(f"    {YEL}강등{RST}: {node['degraded']}")
+        print(f"    invoke   : {invoke_command(r, cwd='<worktree>', roles=roles)}")
+        print(f"    산출     : {out_dir}/result.json"
+              + (f"  (계약 {os.path.basename(spec['output_contract'])})"
+                 if spec.get("output_contract") else "  (계약 없음)"))
+        print(f"    완료보고 : harness run done {nid} --result {out_dir}/result.json")
+
+
+def fanout_source(graph):
+    """fanout 이 산출물을 읽는 선행 노드 id. seed 대상의 기준점이다."""
+    for spec in graph.get("nodes") or []:
+        if spec.get("fanout"):
+            return spec["fanout"]["from"]
+    return None
+
+
+def validate_seed_plan(graph, plan_path):
+    """seed plan 을 읽고 계약을 검증한다. 통과하면 데이터, 아니면 None.
+
+    **run 생성 전에** 부른다 — 실패한 뒤 빈 run 이 남으면 load_state() 가 그것을 집는다.
+    """
+    plan = load(plan_path)
+    if plan is None:
+        err(f"plan 파일 없음: {plan_path}")
+        return None
+    source = fanout_source(graph)
+    if not source:
+        err(f"{graph.get('id')}: fanout 노드가 없어 seed 할 대상을 정할 수 없습니다")
+        return None
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    contract = graph_nodes[source].get("output_contract")
+    if contract:
+        problems = validate_result(contract, plan)
+        if problems:
+            for problem in problems:
+                err(problem)
+            err(f"plan 이 계약({os.path.basename(contract)})을 만족하지 않아 seed 하지 않습니다")
+            return None
+    return plan
+
+
+def apply_seed_plan(state, graph, plan_path, plan):
+    """사람이 미리 만든 설계·티켓으로 run 을 앞당긴다.
+
+    PRD·설계·plan 을 이미 손으로 썼을 때 파이프라인을 처음부터 다시 돌리지 않게 한다.
+    **조용히 건너뛰지 않는다** — 어느 노드를 무슨 근거로 완료로 기록했는지 journal 에 남긴다
+    (rules/COMPLETION-RULE.md — 암묵적 축소 금지).
+    """
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    source = fanout_source(graph)
+
+    # source 의 조상 전부 + 자신
+    seeded, changed = {source}, True
+    while changed:
+        changed = False
+        for nid in list(seeded):
+            for dep in graph_nodes.get(nid, {}).get("inputs", []):
+                if dep not in seeded:
+                    seeded.add(dep)
+                    changed = True
+
+    for nid in seeded:
+        node = state["nodes"][nid]
+        node["status"] = "completed"
+        node["reason"] = "preauthored — 사전 작성 산출물로 seed"
+    out = os.path.join(run_dir(state["run_id"]), source.replace("/", "_"))
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "result.json"), "w") as handle:
+        json.dump(plan, handle, ensure_ascii=False, indent=2)
+
+    journal(state, "seeded", source=source, plan=plan_path,
+            nodes=sorted(seeded), reason="preauthored — 사전 작성 산출물로 seed")
+    save_state(state)
+    ok(f"seed 완료 — {len(seeded)}개 노드를 사전 작성으로 기록 "
+       f"({', '.join(sorted(seeded))})")
+    info(f"티켓 {len(plan.get('tickets') or [])}개 · plan 산출물: {out}/result.json")
+    return 0
+
+
+def verified_runtimes(state, roles, role_name):
+    """이 role 이 검증할 대상들이 **실제로 실행된** 런타임 집합.
+
+    `roles.json#roles[].verifies` 는 정적 선언이고 `harness lint` 가 정적 바인딩을 검사한다.
+    그러나 노드가 소진으로 다른 런타임으로 넘어가면(ADR 0005 페일오버) 검증자와 피검증자가
+    같은 런타임이 될 수 있다 — 그러면 같은 맹점을 공유하고, 정적 검사는 그걸 못 본다.
+    그래서 **실행 시점에** runtime_used 를 본다.
+    """
+    targets = set((roles.get("roles", {}).get(role_name) or {}).get("verifies") or [])
+    if not targets:
+        return []
+    graph = load(state["graph"]) or {}
+    by_id = {n["id"]: n for n in graph.get("nodes") or []}
+    used = set()
+    for nid, node in state["nodes"].items():
+        if not node.get("runtime_used"):
+            continue
+        role = node.get("role") or (by_id.get(nid.split("[")[0]) or {}).get("role")
+        if role in targets:
+            used.add(node["runtime_used"])
+    return sorted(used)
+
+
+def reroute_runtime(roles, role_name, routing, forbidden, adapters):
+    """검증자를 금지 런타임 밖으로 옮긴다. 옮길 곳이 없으면 None.
+
+    등급(tier)은 유지한다 — 판단 노드의 추론 예산을 낮추면 리뷰 품질이 떨어진다.
+    """
+    for candidate in sorted(adapters):
+        if candidate in forbidden:
+            continue
+        moved = resolve_routing(roles, role_name,
+                                {"runtime": candidate, "tier": routing["tier"]}, None)
+        if moved and moved.get("model"):
+            return moved
+    return None
+
+
+def build_node_spec(state, graph, roles, nid):
+    """상태 기계의 노드 → 디스패처가 실행할 스펙.
+
+    라우팅(roles.json) · 페르소나(agents/) · 접근 등급(exec.access) · 선행 산출물 경로 ·
+    출력 계약을 한 dict 로 합친다. 런타임 네이티브 키 번역은 어댑터가 한다 — 여기에
+    런타임 분기를 두지 않는다.
+    """
+    ad = load_runner("adapter")
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    node = state["nodes"][nid]
+    graph_node = base_spec(graph_nodes, nid)
+    role_name = node.get("role") or graph_node.get("role")
+    routing = resolve_routing(roles, role_name, graph_node, state["profile"])
+    if not routing:
+        return None
+
+    # 교차 검증 — 피검증자가 실제로 쓴 런타임을 피한다 (페일오버 우회 차단).
+    forbidden = verified_runtimes(state, roles, role_name)
+    rerouted, blocked = None, False
+    if forbidden and routing["runtime"] in forbidden:
+        moved = reroute_runtime(roles, role_name, routing, forbidden, ad.load_adapters())
+        if moved:
+            rerouted = (f"{routing['runtime']} → {moved['runtime']} "
+                        f"(피검증자가 {', '.join(forbidden)} 로 실행됨)")
+            routing = moved
+        else:
+            blocked = True
+
+    agent = routing.get("agent")
+    agent_file = os.path.join(HARNESS, "agents", f"{agent}.md") if agent else None
+    contract = graph_node.get("output_contract")
+    contract_file = os.path.join(HARNESS, contract) if contract else None
+
+    # 선행 노드 산출물 경로. 없는 경로를 근거로 쓰라고 하면 노드가 추측으로 채운다 —
+    # dispatch.build_prompt 가 실행 전에 존재를 검사한다.
+    inputs = node.get("inputs", graph_node.get("inputs", []))
+    upstream = [(dep, os.path.join(run_dir(state["run_id"]), dep.replace("/", "_"),
+                                   "result.json")) for dep in inputs]
+
+    spec = {
+        "id": nid,
+        "role": role_name,
+        "runtime": routing["runtime"],
+        "model": routing.get("model"),
+        "effort": routing.get("effort"),
+        "agent_file": agent_file,
+        "prompt": graph_node.get("prompt") or f"role {role_name} 의 과업을 수행한다.",
+        "upstream": upstream,
+        "contract_file": contract_file,
+        # 워크트리 격리 — 티켓 자식은 run wave 가 심어 준 전용 트리에서 돈다.
+        # 없으면 run 의 cwd, 그것도 없으면 하네스 루트 (문서 노드용).
+        "cwd": node.get("cwd") or state.get("cwd") or HARNESS,
+        "timeout_sec": graph_node.get("timeout_sec"),
+    }
+    if forbidden:
+        # dispatch 가 failover 대상에서도 제외한다 — 전환으로 다시 같은 런타임이 되면 안 된다.
+        spec["_forbidden_runtimes"] = forbidden
+    if rerouted:
+        spec["_rerouted"] = rerouted
+    if blocked:
+        spec["_cross_review_blocked"] = True
+
+    # fanout 자식이면 자기 티켓 데이터를 싣는다. 없으면 18개 자식이 **전부 같은 프롬프트**를
+    # 받아 자기가 무슨 티켓인지 모른다 (구현 중 실제로 발생시켜 잡았다).
+    parent = node.get("parent")
+    if parent:
+        fan = graph_nodes.get(parent, {}).get("fanout") or {}
+        source = (node_result(state, fan.get("from")) or {}) if fan else {}
+        ticket_id = nid.split("[")[-1].rstrip("]")
+        for item in source.get(fan.get("key")) or []:
+            if isinstance(item, dict) and item.get("id") == ticket_id:
+                spec["ticket"] = item
+                break
+        if "ticket" not in spec:
+            spec["ticket"] = {"id": ticket_id}
+
+    exec_cfg = (roles.get("roles", {}).get(role_name) or {}).get("exec") or {}
+    adapters = ad.load_adapters()
+    if routing["runtime"] in adapters:
+        spec, dropped = ad.project_exec(spec, exec_cfg, adapters[routing["runtime"]])
+        if dropped:
+            spec["_dropped"] = dropped
+    return spec
+
+
+def dispatch_ready(state, graph, roles, dry_run=False, max_parallel=4,
+                   failover=True, only=None, variables=None):
+    """ready 노드를 실제로 실행하고 결과를 상태 기계에 되먹인다.
+
+    **무엇을 실행할지는 정하지 않는다** — ready 셋은 상태 기계가 준다. 게이트·예산 게이트가
+    열려 있으면 아무것도 실행하지 않는다 (ADR 0004·0005).
+    """
+    disp = load_runner("dispatch")
+    ad = load_runner("adapter")
+    if not disp or not ad:
+        return err("orchestration/runner 가 없습니다 — 실행 계층 미설치") or 1
+
+    # run 의 objective 를 {{objective}} 로 자동 주입한다 — 노드마다 --set 을 되풀이하지
+    # 않게 하되, **명시 --set 이 이긴다**(탈출구).
+    variables = dict({"objective": state.get("objective") or ""}, **(variables or {}))
+
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    expand_fanout(state, graph_nodes)
+    save_state(state)
+    ready = ready_nodes(state, graph_nodes)
+
+    if check_budget(state, roles, ready, graph_nodes):
+        gate = state["budget_gate"]
+        err(f"런타임 예산 게이트가 열려 있습니다 ({gate['runtime']} {gate['percent']}%) — "
+            "harness run budget --approve / --reject 로 결정한 뒤 다시 실행하세요")
+        return 1
+
+    waiting = [nid for nid, n in state["nodes"].items() if n["status"] == "awaiting-gate"]
+    if waiting:
+        err(f"사용자 게이트 대기 중: {', '.join(waiting)} — "
+            "harness run gate <node> --approve 로 처리한 뒤 다시 실행하세요")
+        return 1
+
+    if only:
+        ready = [nid for nid in ready if nid in only]
+    if not ready:
+        print("실행 가능한 노드가 없습니다 — harness run status 로 현황을 확인하세요")
+        return 0
+
+    # 게이트 노드는 실행 대상이 아니다. 사람이 판단한다.
+    gates = [nid for nid in ready if state["nodes"][nid].get("gate")]
+    specs, manual, blocked_xreview = [], [], []
+    for nid in ready:
+        if nid in gates:
+            continue
+        spec = build_node_spec(state, graph, roles, nid)
+        if not spec:
+            err(f"{nid}: 라우팅 해석 실패")
+            continue
+        adapters = ad.load_adapters()
+        if spec.get("_cross_review_blocked"):
+            # 조용히 같은 런타임으로 돌리면 리뷰가 작성자와 같은 맹점을 공유한다.
+            # 임의로 결정하지 않고 사람에게 올린다 (ADR 0005 교차 검증).
+            err(f"{nid}: 검증 대상이 이미 모든 런타임을 사용했습니다 "
+                f"({', '.join(spec.get('_forbidden_runtimes') or [])}) — "
+                "어느 런타임으로 리뷰해도 작성자와 맹점을 공유합니다. 다른 런타임을 "
+                "확보하거나, 맹점 공유를 감수할지 사용자가 결정해야 합니다")
+            blocked_xreview.append(nid)
+            continue
+        if spec["runtime"] not in adapters:
+            # host 는 현재 세션 런타임이라 부를 subprocess 가 없다.
+            manual.append((nid, spec))
+            continue
+        specs.append(spec)
+
+    if manual:
+        print(f"{YEL}수동 실행 필요{RST} — 어댑터가 없는 런타임 노드 {len(manual)}개:")
+        for nid, spec in manual:
+            print(f"  {nid}  (role {spec['role']}, runtime {spec['runtime']})")
+            info("현재 세션 런타임에서 직접 수행한 뒤 harness run done 으로 보고하세요")
+
+    for nid in gates:
+        print(f"{YEL}게이트{RST} {nid} — 사람이 판단합니다. "
+              f"업스트림 완료 후 harness run done {nid} 로 대기 상태로 넘기세요")
+
+    if blocked_xreview:
+        journal(state, "cross-review-blocked", nodes=blocked_xreview)
+        save_state(state)
+
+    for spec in specs:
+        if spec.get("_rerouted"):
+            journal(state, "cross-review-reroute", node=spec["id"],
+                    detail=spec["_rerouted"])
+            warn(f"{spec['id']}: 교차 검증 유지를 위해 런타임 재배정 — {spec['_rerouted']}")
+    save_state(state)
+
+    if not specs:
+        return 1 if blocked_xreview else 0
+
+    # 프롬프트를 **먼저** 전수 조립해 검증한다. dry-run 에서도 검증한다 —
+    # 그러지 않으면 드라이런이 통과한 그래프가 실행에서 죽는다 (드라이런의 존재 이유).
+    try:
+        for spec in specs:
+            disp.build_prompt(spec, variables)
+    except Exception as e:  # noqa: BLE001
+        return err(f"실행 전 검증 실패 (0개 노드 실행): {e}") or 1
+
+    print(f"디스패치 {len(specs)}개 (동시 상한 {max_parallel}):")
+    for spec in specs:
+        drop = f"  ⚠ {'; '.join(spec['_dropped'])}" if spec.get("_dropped") else ""
+        print(f"  {spec['id']}  {spec['role']}  {spec['runtime']}/"
+              f"{spec.get('model') or '기본'}{drop}")
+    if dry_run:
+        return 0
+
+    out_dir = run_dir(state["run_id"])
+    os.makedirs(out_dir, exist_ok=True)
+
+    def on_done(result):
+        mark = "✅" if result["status"] == "ok" else "❌"
+        cost = f" ${result['cost_usd']:.4f}" if result.get("cost_usd") else ""
+        hops = ""
+        if result.get("failover"):
+            chain = " → ".join([result["failover"][0]["from"]]
+                               + [h["to"] for h in result["failover"]])
+            hops = f" [failover: {chain}]"
+        print(f"  {mark} {result['id']} — {result['status']} "
+              f"({result.get('duration_s', '?')}s{cost}){hops}")
+
+    try:
+        results = disp.run_wave(specs, ad.load_adapters(), out_dir, variables or {},
+                               max_parallel=max_parallel, failover=failover,
+                               on_done=on_done)
+    except Exception as e:  # noqa: BLE001
+        return err(f"디스패치 실패 (노드 미실행): {e}") or 1
+
+    print()
+    # 결과를 **직렬로** 상태에 커밋한다 — 워커 스레드는 state.json 을 만지지 않는다.
+    rc = 0
+    for result in sorted(results, key=lambda r: r["id"]):
+        nid = result["id"]
+        node = state["nodes"][nid]
+        if result.get("cost_usd") is not None:
+            node["cost_usd"] = result["cost_usd"]
+        node["runtime_used"] = result.get("runtime")
+        if result.get("failover"):
+            journal(state, "failover", node=nid, hops=result["failover"])
+        if result.get("_dropped"):
+            journal(state, "keys-dropped", node=nid, dropped=result["_dropped"])
+        if result["status"] == "ok":
+            data = load(result["output"])
+            if apply_done(state, graph, roles, nid, data) != 0:
+                rc = 1
+        else:
+            reason = result.get("error") or result["status"]
+            if apply_fail(state, graph, roles, nid, reason,
+                          "error" if result["status"] != "timeout" else "error") != 0:
+                rc = 1
+    save_state(state)
+    total = sum(n.get("cost_usd") or 0 for n in state["nodes"].values())
+    if total:
+        print(f"누적 비용 ${total:.4f}")
+    return 1 if blocked_xreview else rc
+
+
+def dispatch_wave(state, graph, roles, fanout_node=None, repo=None,
+                  worktree_root=None, branch_prefix="feat", plan_only=False,
+                  allow_overlap=False, max_parallel=4, dry_run=False,
+                  base="origin/main"):
+    """티켓 fanout 자식을 워크트리에 배치하고 wave 단위로 실행한다.
+
+    의존·소유의 정본은 `plan` 노드 산출물이다 (contracts/design-doc.schema.json).
+    **같은 wave 의 소유 경로 교집합은 실행 전에 막는다** — 병렬 실행이 곧 머지 충돌이다.
+    """
+    wv = load_runner("wave")
+    if not wv:
+        return err("orchestration/runner/wave.py 가 없습니다") or 1
+
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    expand_fanout(state, graph_nodes)
+    save_state(state)
+
+    candidates = [nid for nid, spec in graph_nodes.items() if spec.get("fanout")]
+    fanout_node = fanout_node or (candidates[0] if len(candidates) == 1 else None)
+    if not fanout_node:
+        return err(f"fanout 노드를 지정하세요 (후보: {candidates})") or 1
+    if fanout_node not in graph_nodes:
+        return err(f"그래프에 없는 노드: {fanout_node}") or 1
+
+    parent = state["nodes"].get(fanout_node) or {}
+    children = parent.get("children")
+    if not children:
+        return err(f"{fanout_node}: 아직 fanout 이 전개되지 않았습니다 — "
+                   f"선행 노드({graph_nodes[fanout_node]['fanout'].get('from')})가 "
+                   "완료돼야 티켓 목록이 생깁니다") or 1
+
+    fan = graph_nodes[fanout_node]["fanout"]
+    source = node_result(state, fan["from"]) or {}
+    items = source.get(fan["key"]) or []
+    tickets = {item["id"]: item for item in items if isinstance(item, dict) and item.get("id")}
+    if not tickets:
+        return err(f"{fan['from']} 산출물에 {fan['key']} 가 없습니다") or 1
+
+    repo = os.path.abspath(repo or state.get("repo") or os.getcwd())
+    if not os.path.isdir(os.path.join(repo, ".git")):
+        return err(f"git 저장소가 아닙니다: {repo} — --repo 로 대상 레포를 지정하세요") or 1
+    state["repo"] = repo
+    root = worktree_root or wv.default_worktree_root(repo)
+
+    try:
+        plan = wv.build_plan(tickets, root, branch_prefix)
+    except Exception as e:  # noqa: BLE001
+        return err(str(e)) or 1
+
+    print(f"대상 레포: {repo}")
+    print(f"워크트리 루트: {root}")
+    print(f"티켓 {len(tickets)}개 · 티켓 wave {len(plan['waves'])}개 "
+          f"(너비 {plan['widths']})")
+    for wave in plan["waves"]:
+        print(f"  wave {wave['index']} (너비 {len(wave['ticket_ids'])}): "
+              f"{', '.join(wave['ticket_ids'])}")
+    if plan["external_dependencies"]:
+        print("  대상 밖 의존 — 이미 완료로 간주:")
+        for edge in plan["external_dependencies"]:
+            print(f"    {edge}")
+    # 모든 wave 너비가 1~2면 직선형 — 분해 실패다 (rules/private-ticket.md fan-out 게이트).
+    if plan["linear"]:
+        warn("모든 wave 너비가 1~2 입니다 — 직선형 DAG 는 분해 실패입니다 "
+             "(rules/private-ticket.md fan-out 게이트). 재분해를 검토하세요")
+
+    if plan["conflicts"]:
+        marker = warn if allow_overlap else err
+        marker("같은 wave 의 소유 경로 교집합 — 병렬 실행이 곧 머지 충돌입니다:")
+        for conflict in plan["conflicts"]:
+            print(f"    {conflict}")
+        if not allow_overlap:
+            info("티켓을 다른 wave 로 나누거나 --allow-overlap 을 쓰세요")
+            return 1
+
+    if plan_only:
+        return 0
+
+    # ready 자식만 실행한다 — 티켓 의존은 이미 노드 엣지로 옮겨져 있다 (expand_fanout).
+    ready = [nid for nid in ready_nodes(state, graph_nodes) if nid in children]
+    if not ready:
+        print("실행 가능한 티켓 자식이 없습니다 — harness run status 로 현황을 확인하세요")
+        return 0
+
+    # git worktree add 는 동시 실행에 안전하지 않다 — 스폰 전에 순차로 확보한다.
+    for nid in ready:
+        ticket = nid.split("[")[-1].rstrip("]")
+        if dry_run:
+            state["nodes"][nid]["cwd"] = os.path.join(root, ticket.lower())
+            continue
+        try:
+            state["nodes"][nid]["cwd"] = wv.ensure_worktree(
+                repo, ticket, root, branch_prefix, base)
+        except Exception as e:  # noqa: BLE001
+            return err(str(e)) or 1
+    save_state(state)
+    print(f"\n워크트리 확보 {len(ready)}개 — 티켓 wave 실행")
+    return dispatch_ready(state, graph, roles, dry_run=dry_run,
+                          max_parallel=max_parallel, only=ready)
+
+
+def apply_done(state, graph, roles, nid, data, rework=None):
+    """노드 완료 보고를 처리한다 — 계약 검증 · 산출물 기록 · verdict 루프백.
+
+    `run done` 과 디스패처가 **같은 경로**를 쓴다. 자동 실행이 계약 검증을 건너뛰면
+    "완료" 단언에 근거가 없어진다 (rules/COMPLETION-RULE.md §1~2).
+    """
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    node = state["nodes"].get(nid)
+    if not node:
+        return err(f"run 에 없는 노드: {nid}") or 1
+    spec = base_spec(graph_nodes, nid)
+    contract = spec.get("output_contract")
+    if data is None and contract:
+        return err(f"{nid} 는 계약({os.path.basename(contract)})이 있어 결과가 필요합니다") or 1
+
+    if contract and data is not None:
+        problems = validate_result(contract, data)
+        if problems:
+            for p in problems:
+                err(p)
+            retry = spec.get("retry", {})
+            node["attempts"] += 1
+            node["reason"] = f"contract_violation ({len(problems)}건)"
+            over = node["attempts"] > retry.get("max", 0)
+            allowed = "contract_violation" in retry.get("on", [])
+            node["status"] = "pending" if (allowed and not over) else "failed"
+            journal(state, "contract-violation", node=nid, count=len(problems),
+                    attempts=node["attempts"], next_status=node["status"])
+            save_state(state)
+            print(f"\n계약 위반 {len(problems)}건 — {nid} 는 완료로 기록하지 않았습니다 "
+                  f"({node['status']}, 시도 {node['attempts']}/{retry.get('max', 0) + 1})")
+            return 1
+
+    if data is not None:
+        out = os.path.join(run_dir(state["run_id"]), nid.replace("/", "_"))
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "result.json"), "w") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # 리뷰 verdict 루프백 — retry.to 가 있으면 그 노드부터 다시 연다
+    verdict = (data or {}).get("verdict")
+    retry = spec.get("retry", {})
+    if verdict == "REQUEST_CHANGES" and "verdict_request_changes" in retry.get("on", []):
+        node["attempts"] += 1
+        over = node["attempts"] > retry.get("max", 0)
+        override = rework
+        targets = ([t.strip() for t in override.split(",")] if override
+                   else retry.get("to") or [])
+        if isinstance(targets, str):
+            targets = [targets]
+        node["status"] = "failed" if over else "pending"
+        node["reason"] = "verdict REQUEST_CHANGES"
+        reopened = []
+        if targets and not over:
+            for cand, n2 in state["nodes"].items():
+                if cand in targets or n2.get("parent") in targets:
+                    n2["status"] = "pending"
+                    n2.pop("children", None)
+                    reopened.append(cand)
+            # 자식만 좁혀 재작업할 때도 부모는 미완료로 되돌린다 —
+            # 그러지 않으면 후행 노드(리뷰)가 재작업 완료 전에 열린다
+            for cand in list(reopened):
+                parent = state["nodes"][cand].get("parent")
+                if parent and state["nodes"][parent]["status"] == "completed":
+                    state["nodes"][parent]["status"] = "expanded"
+            unknown = [t for t in targets if t not in state["nodes"]]
+            for u in unknown:
+                warn(f"--rework 대상이 run 에 없음: {u}")
+        journal(state, "request-changes", node=nid, attempts=node["attempts"],
+                reopened=reopened)
+        save_state(state)
+        warn(f"{nid}: REQUEST_CHANGES — 결과는 기록했고 게이트는 열지 않았습니다 "
+             f"(시도 {node['attempts']}/{retry.get('max', 0) + 1})")
+        if reopened:
+            info(f"재작업 대상 재개방: {', '.join(reopened)}")
+        print()
+        print_next(state, graph, roles)
+        return 0
+
+    node["status"] = "awaiting-gate" if spec.get("gate") else "completed"
+    node.pop("reason", None)
+    journal(state, "node-done", node=nid, status=node["status"])
+    save_state(state)
+    ok(f"{nid} 완료" + (f" — 계약 통과({os.path.basename(contract)})" if contract else "")
+       + (" · 사용자 게이트 대기" if node["status"] == "awaiting-gate" else ""))
+    print()
+    print_next(state, graph, roles)
+    return 0
+
+
+
+def apply_fail(state, graph, roles, nid, reason="사유 미기재", kind="error"):
+    """노드 실패를 기록한다 — retry.on · on_failure 정책 적용.
+
+    `run fail` 과 디스패처가 같은 경로를 쓴다. 스킵·실패는 journal 에 사유와 함께 남는다
+    (암묵적 축소 금지).
+    """
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+    node = state["nodes"].get(nid)
+    if not node:
+        return err(f"run 에 없는 노드: {nid}") or 1
+    spec = base_spec(graph_nodes, nid)
+    retry = spec.get("retry", {})
+    node["attempts"] += 1
+    node["reason"] = f"{kind}: {reason}"
+    if kind in retry.get("on", []) and node["attempts"] <= retry.get("max", 0):
+        node["status"] = "pending"
+        warn(f"{nid} 실패 — 재시도 가능 ({node['attempts']}/{retry.get('max', 0) + 1})")
+    else:
+        policy = spec.get("on_failure", "halt")
+        node["status"] = "skipped" if policy == "skip" else "failed"
+        (warn if policy == "skip" else err)(
+            f"{nid} 실패 — on_failure={policy} 적용 ({node['status']})")
+        if policy == "halt":
+            info("halt: 후행 노드는 열리지 않습니다. 원인 해결 후 "
+                 f"`harness run fail {nid}` 없이 다시 `run done` 하거나 state.json 을 확인하세요")
+    journal(state, "node-failed", node=nid, kind=kind, reason=reason,
+            status=node["status"])
+    save_state(state)
+    print()
+    print_next(state, graph, roles)
+    return 0
+
+
+
+def cmd_run(args):
+    if not args:
+        print("사용법: harness run <new|status|next|dispatch|wave|done|fail|gate|budget> ...")
+        return 2
+    sub, rest = args[0], args[1:]
+
+    def opt(name, default=None):
+        return rest[rest.index(name) + 1] if name in rest else default
+
+    roles = load("roles.json")
+
+    if sub == "new":
+        graph_path = next((a for a in rest if a.endswith(".json")),
+                          "orchestration/private-feature.json")
+        graph = load(graph_path)
+        if not graph:
+            return err(f"그래프 없음: {graph_path}") or 1
+        profile = opt("--profile", roles["active_profile"])
+        level = opt("--level", "L2")
+        if level not in LEVELS:
+            return err(f"--level 값이 잘못됨: {level}") or 1
+
+        # seed 는 run 생성 **전에** 검증한다. 실패한 뒤 빈 run 이 남으면 load_state() 가
+        # 그것을 집어 다음 명령이 엉뚱한 상태를 읽는다 (구현 중 실제로 겪었다).
+        seed = opt("--seed-plan")
+        seed_plan_data = None
+        if seed:
+            seed_plan_data = validate_seed_plan(graph, seed)
+            if seed_plan_data is None:
+                return 1
+        import datetime
+        run_id = f"{graph['id']}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+        state = {"run_id": run_id, "graph": graph_path, "profile": profile,
+                 "level": level, "objective": opt("--objective", ""),
+                 "created_at": now_iso(), "nodes": {}}
+        for n in graph["nodes"]:
+            degraded = None
+            if LEVELS[n["requires"]] > LEVELS[level]:
+                degraded = (f"requires {n['requires']} > 런타임 {level} — "
+                            f"capabilities.md 강등 사다리 적용 (병렬 → 직렬)")
+            state["nodes"][n["id"]] = {"status": "pending", "attempts": 0,
+                                       "gate": n.get("gate"), "degraded": degraded}
+        save_state(state)
+        journal(state, "run-created", graph=graph_path, profile=profile, level=level)
+
+        if seed_plan_data is not None:
+            apply_seed_plan(state, graph, seed, seed_plan_data)
+        ok(f"run 생성: runs/{run_id}  (그래프 {graph['id']}, 프로파일 {profile}, 레벨 {level})")
+        print()
+        print_next(state, graph, roles)
+        return 0
+
+    state = load_state(opt("--run"))
+    if not state:
+        return err("진행 중인 run 이 없습니다 — harness run new 로 시작하세요") or 1
+    graph = load(state["graph"])
+    graph_nodes = {n["id"]: n for n in graph["nodes"]}
+
+    if sub == "status":
+        expand_fanout(state, graph_nodes)
+        save_state(state)
+        print(f"run {state['run_id']}  (프로파일 {state['profile']}, 레벨 {state['level']})")
+        if state.get("objective"):
+            print(f"목표: {state['objective']}")
+        icon = {"completed": "✅", "pending": "⬜", "failed": "❌",
+                "skipped": "⏭", "awaiting-gate": "⛔", "expanded": "🔀"}
+        for nid, n in state["nodes"].items():
+            role = n.get("role") or graph_nodes.get(nid, {}).get("role", "")
+            extra = []
+            if n["attempts"]:
+                extra.append(f"시도 {n['attempts']}")
+            if n.get("degraded"):
+                extra.append("강등")
+            if n.get("reason"):
+                extra.append(n["reason"][:40])
+            print(f"  {icon.get(n['status'], '?')} {nid:<22} {role:<18} {n['status']:<14}"
+                  + ("  " + " · ".join(extra) if extra else ""))
+        print()
+        print_next(state, graph, roles)
+        return 0
+
+    if sub == "next":
+        print_next(state, graph, roles)
+        return 0
+
+    if sub == "budget":
+        if "--approve" in rest or "--reject" in rest:
+            if not resolve_budget_gate(state, roles, approve="--approve" in rest):
+                return err("전환 대기 중인 런타임 예산 게이트가 없습니다") or 1
+            print()
+            print_next(state, graph, roles)
+            return 0
+        gate = state.get("budget_gate")
+        print(f"run {state['run_id']}  (현재 프로파일 {state['profile']})")
+        for runtime, policy in (roles.get("runtime_budget") or {}).items():
+            if runtime.startswith("_"):
+                continue
+            print(f"  {usage_line(runtime_usage(runtime), policy)}"
+                  f"  → 초과 시 {policy.get('fallback_profile')}")
+        if gate:
+            print(f"  게이트: {gate['status']} ({gate['runtime']} {gate['percent']}% "
+                  f"@ {gate.get('observed_at')})")
+        return 0
+
+    if sub == "dispatch":
+        only = [v.strip() for v in (opt("--only") or "").split(",") if v.strip()] or None
+        variables = {}
+        for i, token in enumerate(rest):
+            if token == "--set" and i + 1 < len(rest) and "=" in rest[i + 1]:
+                key, value = rest[i + 1].split("=", 1)
+                variables[key.strip()] = value
+        rc = dispatch_ready(state, graph, roles,
+                            dry_run="--dry-run" in rest,
+                            max_parallel=int(opt("--max-parallel", "4")),
+                            failover="--no-failover" not in rest,
+                            only=only, variables=variables)
+        if not ("--dry-run" in rest):
+            print()
+            print_next(state, graph, roles)
+        return rc
+
+    if sub == "wave":
+        target = rest[0] if rest and not rest[0].startswith("--") else None
+        rc = dispatch_wave(state, graph, roles, fanout_node=target,
+                           repo=opt("--repo"), worktree_root=opt("--worktree-root"),
+                           branch_prefix=opt("--branch-prefix", "feat"),
+                           plan_only="--plan-only" in rest,
+                           allow_overlap="--allow-overlap" in rest,
+                           max_parallel=int(opt("--max-parallel", "4")),
+                           dry_run="--dry-run" in rest,
+                           base=opt("--base", "origin/main"))
+        return rc
+
+    if sub in ("done", "fail", "gate"):
+        if not rest or rest[0].startswith("--"):
+            return err(f"노드 id 가 필요합니다: harness run {sub} <node>") or 1
+        nid = rest[0]
+        node = state["nodes"].get(nid)
+        if not node:
+            return err(f"run 에 없는 노드: {nid}") or 1
+        spec = base_spec(graph_nodes, nid)
+
+    if sub == "gate":
+        if node["status"] != "awaiting-gate":
+            return err(f"{nid} 는 게이트 대기 상태가 아닙니다 (현재 {node['status']})") or 1
+        if "--approve" in rest:
+            node["status"] = "completed"
+            journal(state, "gate-approved", node=nid)
+            ok(f"게이트 승인: {nid}")
+        else:
+            reason = opt("--reject", "사유 미기재")
+            node["status"] = "pending"
+            node["attempts"] += 1
+            node["reason"] = f"게이트 반려: {reason}"
+            journal(state, "gate-rejected", node=nid, reason=reason)
+            warn(f"게이트 반려: {nid} — {reason}")
+        save_state(state)
+        print()
+        print_next(state, graph, roles)
+        return 0
+
+    if sub == "done":
+        result_path = opt("--result")
+        data = None
+        if result_path:
+            data = json.load(sys.stdin) if result_path == "-" else load(result_path)
+            if data is None:
+                return err(f"결과 파일 없음: {result_path}") or 1
+        return apply_done(state, graph, roles, nid, data, opt("--rework"))
+
+    if sub == "fail":
+        return apply_fail(state, graph, roles, nid,
+                          opt("--reason", "사유 미기재"), opt("--kind", "error"))
+
+    return err(f"알 수 없는 서브커맨드: {sub}") or 2
+
+
+# ── score (진단 Rubric) ───────────────────────────────────────────────────────
+def _sh(cmd):
+    """검사용 셸 한 줄. (exit_code, stdout) 반환."""
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=HARNESS)
+    return p.returncode, p.stdout.strip()
+
+
+def rubric_checks():
+    """각 항목: (영역, 배점, 체크명, 판정함수) — 판정은 True/False/None(수동)."""
+    H = HARNESS
+
+    def exists(*paths):
+        return all(os.path.exists(os.path.join(H, p)) for p in paths)
+
+    def lint_clean():
+        code, _ = _sh("python3 bin/harness lint >/dev/null 2>&1")
+        return code == 0
+
+    def completed_run_exists():
+        """runs/ 어디든(archive 포함) 노드가 실제 완료된 run 이 있는가.
+
+        state.json 존재만으로는 부족하다 — run new 직후에도 파일은 생긴다.
+        노드 하나라도 completed 여야 "실행 이력" 이다.
+        """
+        if not os.path.isdir(RUNS):
+            return False
+        for base, _dirs, files in os.walk(RUNS):
+            if "state.json" not in files:
+                continue
+            try:
+                with open(os.path.join(base, "state.json")) as handle:
+                    state = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            nodes = (state.get("nodes") or {}).values()
+            if any(n.get("status") == "completed" for n in nodes):
+                return True
+        return False
+
+    def no_abs_user_path():
+        # 하네스 정의가 특정 머신 절대경로에 묶이면 다른 머신에서 깨진다.
+        # 개인 산출물 경로(rules/, agents/)는 의도된 것이라 제외하고 실행 계층만 본다.
+        # runtime_passthrough 는 외부 도구(Orca·플러그인)가 준 값을 그대로 실어 나르는
+        # 구역이라 머신 경로가 들어간다 — 하네스 소유가 아니므로 제외한다.
+        home = "/Users/" + "biuea"
+        targets = ["bin/harness", "roles.json", "contracts", "orchestration",
+                   "adapters/claude-code/build.py", "adapters/codex/build.py"]
+        # -I 로 바이너리 제외 · __pycache__ 는 gitignore 된 컴파일 산출물이라 대상이 아니다.
+        # (이걸 빼면 러너를 한 번 로드한 뒤 검사가 거짓 실패한다 — 실제로 겪었다)
+        skip = "--exclude-dir=__pycache__ --exclude=*.pyc"
+        for t in targets:
+            code, out = _sh(f"grep -rnI {skip} '{home}' {t} 2>/dev/null "
+                            f"| grep -v 'home = ' | wc -l")
+            if out.strip() != "0":
+                return False
+        policy = load("policy.json") or {}
+        owned = json.dumps({k: v for k, v in policy.items()
+                            if k != "runtime_passthrough"}, ensure_ascii=False)
+        return home not in owned
+
+    def hooks_syntax():
+        code, out = _sh("for f in hooks/*.sh; do bash -n \"$f\" || echo BAD; done 2>&1 | "
+                        "grep -c BAD || true")
+        return out.strip() in ("", "0")
+
+    def hooks_self_guard():
+        policy = load("policy.json") or {}
+        total = guarded = 0
+        for g in policy.get("gates", []):
+            p = os.path.join(H, g["script"])
+            if not os.path.exists(p):
+                continue
+            total += 1
+            body = open(p, errors="ignore").read()
+            if "tool_name" in body or "tool_input" in body:
+                guarded += 1
+        return total > 0 and guarded == total
+
+    def contracts_validate():
+        # 검증기가 실제로 위반을 잡는지 — 통과만 하는 검증기는 검증기가 아니다
+        bad = {"verdict": "APPROVED",
+               "findings": [{"level": "p0", "file": "A.kt", "line": 1,
+                             "problem": "심각한 문제가 있습니다", "direction": "고쳐야 합니다"}],
+               "reviewed": {"files_changed": 1, "files_read": 1}, "summary_md": "x"}
+        return len(validate_result("contracts/review-verdict.schema.json", bad)) > 0
+
+    def routing_resolves():
+        roles = load("roles.json")
+        graph = load("orchestration/private-feature.json")
+        if not roles or not graph:
+            return False
+        return all(expected_routing(roles, n) is not None for n in graph["nodes"])
+
+    def agents_have_sections():
+        roles = load("roles.json") or {}
+        for spec in roles.get("roles", {}).values():
+            p = os.path.join(H, "agents", spec["agent"] + ".md")
+            if not os.path.exists(p):
+                return False
+            body = open(p, errors="ignore").read()
+            if "## 역할 경계" not in body or "## 출력 형식" not in body:
+                return False
+        return True
+
+    def rules_declare_scope():
+        idx = load_rules()
+        return bool(idx) and all(r["id"] and r["scope"] and r["context"] for r in idx)
+
+    def skills_declare():
+        for d in sorted(os.listdir(os.path.join(H, "skills"))):
+            p = os.path.join(H, "skills", d, "SKILL.md")
+            if not d.startswith("private-") or not os.path.exists(p):
+                continue
+            block = frontmatter(p)
+            if fm_value(block, "requires") not in LEVELS or not fm_list(block, "roles"):
+                return False
+        return True
+
+    def kebab_case():
+        bad = []
+        for d in ("rules", "agents", "hooks", "contracts", "orchestration"):
+            for f in os.listdir(os.path.join(H, d)):
+                stem = f.rsplit(".", 1)[0]
+                if f == "README.md" or stem == "COMPLETION-RULE":
+                    continue
+                if not re.fullmatch(r"[0-9a-z][0-9a-z.-]*", stem):
+                    bad.append(f"{d}/{f}")
+        return not bad
+
+    def secrets_guarded():
+        policy = load("policy.json") or {}
+        ids = {g["id"] for g in policy.get("gates", [])}
+        return any("secret" in i for i in ids)
+
+    def destructive_guarded():
+        policy = load("policy.json") or {}
+        blocking = {g["id"] for g in policy.get("gates", []) if g["enforcement"] == "blocking"}
+        return any("destructive" in i or "block" in i for i in blocking)
+
+    return [
+        ("A. 런타임 이식성", 16, "머신 절대경로 비의존 (실행 계층)", no_abs_user_path),
+        ("A. 런타임 이식성", 16, "런타임별 어댑터 + capabilities 선언", lambda: exists(
+            "adapters/claude-code/capabilities.json", "adapters/codex/capabilities.json")),
+        ("A. 런타임 이식성", 16, "role→runtime 바인딩이 프로파일로 전환 가능", lambda: len(
+            (load("roles.json") or {}).get("bindings", {})) >= 2),
+
+        ("B. 완결성", 14, "선언한 표면이 실재 (lint 오류 0)", lint_clean),
+        ("B. 완결성", 14, "핵심 파일 존재", lambda: exists(
+            "HARNESS.md", "policy.json", "roles.json", "capabilities.md",
+            "bin/harness", "docs/ssot-map.md", "docs/onboarding.md")),
+
+        ("C. 일관성", 10, "registry README 목록 = 실제 파일", lambda: not any(
+            "README.md 목록 누락" in e for e in errors)),
+        ("C. 일관성", 10, "kebab-case 파일명", kebab_case),
+        ("C. 일관성", 10, "rules frontmatter 스키마 통일", rules_declare_scope),
+
+        ("D. 실효성", 18, "훅 bash -n 통과", hooks_syntax),
+        ("D. 실효성", 18, "훅이 입력 JSON 자체 가드", hooks_self_guard),
+        ("D. 실효성", 18, "계약 검증기가 실제 위반을 잡음", contracts_validate),
+        ("D. 실효성", 18, "그래프 전 노드 라우팅 해석 성공", routing_resolves),
+        # 아래 둘은 "만들어 놓고 안 돌려본" 상태를 잡는다.
+        # 정의가 실재해도 한 번도 실행되지 않았다면 실효성의 증거가 없다.
+        ("D. 실효성", 18, "eval 자동 채점기 존재 (모델 강등 회귀 검증)", lambda: _sh(
+            "grep -rq 'def grade\\|자동 채점기' evals/ 2>/dev/null")[0] == 0),
+        # runs/archive/ 도 센다 — 끝난 run 을 치우면 latest_run() 이 그걸 집어 다른 세션이
+        # 남의 run 을 이어받는다. 그래서 아카이브하는데, 아카이브가 이력을 지우면 안 된다.
+        ("D. 실효성", 18, "실 그래프 실행 이력 (완료된 run 이 실재)", completed_run_exists),
+
+        ("E. 온보딩", 8, "onboarding 문서 존재", lambda: exists("docs/onboarding.md")),
+        ("E. 온보딩", 8, "doctor 로 설치 상태 자가진단", lambda: exists("bin/harness")),
+
+        ("F. 유지보수성", 12, "변경 절차 표 존재", lambda: "## 변경 절차" in open(
+            os.path.join(H, "HARNESS.md"), errors="ignore").read()),
+        ("F. 유지보수성", 12, "cross-file drift 검증 수단", lambda: _sh(
+            "grep -q 'def lint_readmes' bin/harness")[0] == 0),
+        ("F. 유지보수성", 12, "SSOT 맵 존재", lambda: exists("docs/ssot-map.md")),
+
+        ("G. 안전성", 12, "시크릿 Read/Edit 가드", secrets_guarded),
+        ("G. 안전성", 12, "파괴적 명령 차단 훅", destructive_guarded),
+        ("G. 안전성", 12, "모델·라우팅 SSOT 단일화 (agent frontmatter 금지)", lambda: not any(
+            fm_value(frontmatter(os.path.join(H, "agents", s["agent"] + ".md")), "model")
+            for s in (load("roles.json") or {}).get("roles", {}).values())),
+
+        ("H. 문서 정합성", 10, "에이전트 필수 섹션", agents_have_sections),
+        ("H. 문서 정합성", 10, "스킬 requires·roles 선언", skills_declare),
+        ("H. 문서 정합성", 10, "그래프 _routing 주석 최신", lambda: not any(
+            "_routing" in w for w in warns)),
+    ]
+
+
+def cmd_score(args):
+    # lint 를 먼저 돌려 errors/warns 를 채운다 (일부 체크가 그 결과를 본다)
+    quiet = []
+    global errors, warns
+    saved_err, saved_warn = errors, warns
+    errors, warns = [], []
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_lint([])
+    lint_errors, lint_warns = list(errors), list(warns)
+    errors, warns = saved_err, saved_warn
+
+    globals()["errors"], globals()["warns"] = lint_errors, lint_warns
+    checks = rubric_checks()
+    globals()["errors"], globals()["warns"] = saved_err, saved_warn
+
+    areas = {}
+    for area, points, name, fn in checks:
+        try:
+            passed = fn()
+        except Exception as exc:                      # 검사 자체가 깨지면 실패로 센다
+            passed, name = False, f"{name} (검사 오류: {exc})"
+        areas.setdefault(area, {"points": points, "items": []})["items"].append((name, passed))
+
+    total = earned = 0
+    fails = []
+    print(f"하네스 진단 — lint 오류 {len(lint_errors)} / 경고 {len(lint_warns)}\n")
+    for area, data in areas.items():
+        items = data["items"]
+        rate = sum(1 for _, p in items if p) / len(items)
+        if rate >= 0.8:
+            verdict, got = "PASS", data["points"]
+        elif rate >= 0.4:
+            verdict, got = "PARTIAL", data["points"] // 2
+        else:
+            verdict, got = "FAIL", 0
+            fails.append(area)
+        total += data["points"]
+        earned += got
+        color = GRN if verdict == "PASS" else (YEL if verdict == "PARTIAL" else RED)
+        print(f"{color}{verdict:<8}{RST} {area:<18} {got:>2}/{data['points']:<3} "
+              f"({sum(1 for _, p in items if p)}/{len(items)})")
+        for name, passed in items:
+            if not passed:
+                print(f"           {RED}✗{RST} {name}")
+    print(f"\n총점 {earned}/{total}  (합격선 90)")
+    if len(fails) >= 2:
+        err(f"FAIL 영역 {len(fails)}개 ({', '.join(fails)}) — 총점과 무관하게 하네스 신뢰 불가")
+        return 1
+    if earned < 90:
+        warn(f"합격선 미달 — {90 - earned}점 부족")
+        return 1
+    ok("합격선 통과")
+    return 0
+
+
+# ── doctor ───────────────────────────────────────────────────────────────────
+def cmd_doctor(args):
+    policy = load("policy.json") or {}
+    print("── 런타임 ──")
+    for runtime in RUNTIMES:
+        caps = load(f"adapters/{runtime}/capabilities.json")
+        home = {"claude-code": "~/.claude", "codex": "~/.codex",
+                "gemini": "~/.gemini", "cursor": "~/.cursor"}[runtime]
+        present = os.path.isdir(os.path.expanduser(home))
+        if not caps:
+            info(f"{runtime}: 어댑터 미구현 ({'설치됨' if present else '미설치'})")
+            continue
+        probes = [k for k, v in caps.get("verified", {}).items() if str(v).startswith("probe")]
+        line = f"{runtime}: {caps['level']} / {home} {'있음' if present else '없음'}"
+        (ok if present else warn)(line)
+        if probes:
+            info(f"미확인 능력: {', '.join(probes)}")
+
+    print("\n── 심링크 ──")
+    for runtime in RUNTIMES:
+        caps = load(f"adapters/{runtime}/capabilities.json")
+        if not caps or caps.get("link_strategy") != "whole-dir":
+            continue
+        for target_rel, src_rel in caps.get("links", {}).items():
+            target, src = os.path.expanduser(target_rel), os.path.join(HARNESS, src_rel)
+            if os.path.islink(target) and os.path.realpath(target) == os.path.realpath(src):
+                ok(f"{target_rel} → {src_rel}")
+            elif os.path.isdir(target):
+                warn(f"{target_rel} 이 실디렉토리 — 아직 링크 안 됨 (harness link --install)")
+            else:
+                err(f"{target_rel} 없음 또는 잘못된 링크")
+
+    print("\n── 생성물 드리프트 ──")
+    for runtime, live in (("claude-code", "~/.claude/settings.json"),
+                          ("codex", "~/.codex/hooks.json")):
+        out = os.path.join(HARNESS, "adapters", runtime, ".out", os.path.basename(live))
+        live_path = os.path.expanduser(live)
+        if not os.path.exists(out):
+            info(f"{runtime}: 빌드 산출물 없음 — harness build 먼저 실행")
+            continue
+        if not os.path.exists(live_path):
+            warn(f"{runtime}: {live} 없음")
+            continue
+        same = load(out) == load(live_path)
+        (ok if same else warn)(f"{runtime}: {live} — {'최신' if same else '드리프트 있음 (build --install 필요)'}")
+        marker = os.path.expanduser(f"{'~/.claude' if runtime == 'claude-code' else '~/.codex'}/.harness-build.json")
+        m = load(marker)
+        if m and m.get("harness_version") != policy.get("version"):
+            warn(f"{runtime}: 빌드 버전 {m.get('harness_version')} ≠ policy {policy.get('version')}")
+
+    print("\n── 훅 자체 가드 ──")
+    guarded = unguarded = 0
+    for gate in policy.get("gates", []):
+        path = os.path.join(HARNESS, gate["script"])
+        if not os.path.exists(path):
+            continue
+        with open(path, errors="ignore") as f:
+            body = f.read()
+        if "tool_name" in body or "tool_input" in body:
+            guarded += 1
+        else:
+            unguarded += 1
+    ok(f"입력 JSON 을 읽어 자체 가드하는 훅 {guarded}개")
+    if unguarded:
+        warn(f"자체 가드가 없어 보이는 훅 {unguarded}개 — matcher 미지원 런타임(codex)에서 오탐 가능")
+
+    print()
+    print(f"오류 {len(errors)} / 경고 {len(warns)}")
+    return 1 if errors else 0
+
+
+# ── eval ─────────────────────────────────────────────────────────────────────
+def cmd_eval(args):
+    tasks_dir = os.path.join(HARNESS, "evals/tasks")
+    tasks = sorted(d for d in os.listdir(tasks_dir)
+                   if os.path.isdir(os.path.join(tasks_dir, d)))
+    print("골든 태스크:")
+    for t in tasks:
+        expected = load(os.path.join(tasks_dir, t, "expected.json")) or {}
+        print(f"  {t} — 필수 {len(expected.get('required', []))}개 / "
+              f"권장 {len(expected.get('recommended', []))}개")
+    print()
+    info("실행은 대상 (role, model) 바인딩으로 prompt.md 를 준 뒤,")
+    info("transcript 를 expected.json 의 detect 기준으로 채점합니다.")
+    info("자동 채점기는 아직 없습니다 — 수동 채점 결과를 runs/eval-<ts>/report.json 에 남기세요.")
+    return 0
+
+
+# ── usage (런타임 사용량 조회) ────────────────────────────────────────────────
+def cmd_usage(args):
+    roles = load("roles.json") or {}
+    budgets = {k: v for k, v in (roles.get("runtime_budget") or {}).items()
+               if not k.startswith("_")}
+    targets = [a for a in args if not a.startswith("--")] or sorted(budgets)
+    out = {}
+    for runtime in targets:
+        usage = runtime_usage(runtime)
+        policy = budgets.get(runtime)
+        out[runtime] = {"usage": usage, "policy": policy,
+                        "exceeded": bool(usage and policy
+                                         and usage["percent"] >= policy.get("threshold_percent", 80))}
+        if "--json" not in args:
+            print(usage_line(usage, policy)
+                  + (f"  {YEL}→ 임계 초과 ({policy.get('fallback_profile')} 전환 대상){RST}"
+                     if out[runtime]["exceeded"] else ""))
+    if "--json" in args:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 1 if any(v["exceeded"] for v in out.values()) else 0
+
+
+def cmd_plan(args):
+    """티켓 md → plan 산출물. 파이프라인이 만들지 않은 티켓으로도 run wave 를 돌린다.
+
+      harness plan from-tickets <티켓 디렉토리> [--dag P] [--out P] [--role ID=role] [--json]
+    """
+    if not args or args[0] != "from-tickets":
+        print("사용법: harness plan from-tickets <티켓 디렉토리> "
+              "[--dag <분해DAG.md>] [--out <plan.json>] [--role ID=role] [--json]")
+        return 2
+    rest = args[1:]
+
+    def opt(name, default=None):
+        return rest[rest.index(name) + 1] if name in rest else default
+
+    positional = [a for i, a in enumerate(rest)
+                  if not a.startswith("--")
+                  and (i == 0 or not rest[i - 1].startswith("--"))]
+    if not positional:
+        return err("티켓 디렉토리를 지정하세요") or 1
+
+    tk = load_runner("tickets")
+    if not tk:
+        return err("orchestration/runner/tickets.py 가 없습니다") or 1
+
+    overrides = {}
+    for i, token in enumerate(rest):
+        if token == "--role" and i + 1 < len(rest) and "=" in rest[i + 1]:
+            key, value = rest[i + 1].split("=", 1)
+            overrides[key.strip()] = value.strip()
+
+    try:
+        plan = tk.plan_from_tickets(os.path.expanduser(positional[0]),
+                                    dag_path=opt("--dag"), doc_path=opt("--doc"),
+                                    roles=overrides)
+    except Exception as e:  # noqa: BLE001
+        return err(str(e)) or 1
+
+    problems = validate_result("contracts/design-doc.schema.json", plan)
+
+    if "--json" in rest:
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+    else:
+        print(f"티켓 {len(plan['tickets'])}개  ·  wave {len(plan['waves'])}개")
+        for wave in plan["waves"]:
+            print(f"  wave {wave['index']} (너비 {len(wave['ticket_ids'])}): "
+                  f"{', '.join(wave['ticket_ids'])}")
+        by_role = {}
+        for ticket in plan["tickets"]:
+            by_role.setdefault(ticket["role"], []).append(ticket["id"])
+        print("  role 배정:")
+        for role, ids in sorted(by_role.items()):
+            print(f"    {role:<20} {len(ids)}건  {', '.join(ids)}")
+
+    out = opt("--out")
+    if out:
+        # 계약을 통과하지 못한 plan 도 저장한다 — 무엇이 걸렸는지 보고 고쳐야 하기 때문이다.
+        # 다만 run new --seed-plan 은 이 파일을 거부한다.
+        with open(os.path.expanduser(out), "w") as handle:
+            json.dump(plan, handle, ensure_ascii=False, indent=2)
+        ok(f"저장: {out}")
+
+    if problems:
+        print()
+        for problem in problems:
+            err(problem)
+        info("계약 위반이 있으면 `run new --seed-plan` 이 거부합니다 — 티켓 분해를 고치세요")
+        return 1
+    ok("design-doc 계약 통과")
+    return 0
+
+
+def cmd_test(args):
+    """tests/*.py 를 전부 실행한다. 서드파티 러너 의존 없음 (각 파일이 스스로 판정).
+
+    COMPLETION-RULE §2 — exit code 로 확인한다. 파이프로 exit code 를 가리지 않는다.
+    """
+    tests_dir = os.path.join(HARNESS, "tests")
+    wanted = [a for a in args if not a.startswith("--")]
+    files = sorted(f for f in os.listdir(tests_dir)
+                   if f.startswith("test_") and f.endswith(".py"))
+    if wanted:
+        files = [f for f in files if any(w in f for w in wanted)]
+    if not files:
+        return err("실행할 테스트가 없습니다") or 1
+
+    failed = []
+    for name in files:
+        path = os.path.join(tests_dir, name)
+        proc = subprocess.run([sys.executable, path], capture_output=True, text=True,
+                              cwd=HARNESS)
+        cases = proc.stdout.count("  ok   ")
+        if proc.returncode == 0:
+            ok(f"{name} — {cases}건 통과")
+        else:
+            failed.append(name)
+            err(f"{name} — exit {proc.returncode}")
+            for line in proc.stdout.splitlines():
+                if "FAIL" in line or "실패" in line:
+                    print(f"    {line.strip()}")
+            if proc.stderr.strip():
+                print(f"    {proc.stderr.strip().splitlines()[-1]}")
+    # 테스트가 bin/harness 를 모듈로 로드하면 __pycache__ 가 생긴다. gitignore 되지만
+    # 파일시스템에 남으면 "머신 절대경로 비의존" 검사가 거짓 실패한다 — 여기서 치운다.
+    import shutil as _shutil
+    for base, dirs, _ in os.walk(HARNESS):
+        if ".git" in base:
+            continue
+        for d in list(dirs):
+            if d == "__pycache__":
+                _shutil.rmtree(os.path.join(base, d), ignore_errors=True)
+    print()
+    print(f"테스트 파일 {len(files) - len(failed)}/{len(files)} 통과")
+    return 1 if failed else 0
+
+
+COMMANDS = {"build": cmd_build, "link": cmd_link, "lint": cmd_lint, "usage": cmd_usage,
+            "role": cmd_role, "rules": cmd_rules, "graph": cmd_graph,
+            "validate": cmd_validate,
+            "run": cmd_run, "score": cmd_score, "doctor": cmd_doctor,
+            "eval": cmd_eval, "test": cmd_test, "plan": cmd_plan}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print(__doc__)
+        sys.exit(2)
+    sys.exit(COMMANDS[sys.argv[1]](sys.argv[2:]))

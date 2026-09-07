@@ -1,0 +1,236 @@
+{
+  "version": "2.0.0",
+  "_doc": "role → (agent, runtime, tier) 바인딩. 스킬·그래프는 구체 agent를 참조하지 않고 role만 참조한다. runtime(어느 LLM)과 tier(그 안의 성능 등급)는 별개 축이다 — 한 필드에 섞지 않는다. 근거: docs/decisions/0002-llm-runtime-routing.md",
+
+  "runtimes": {
+    "claude": {
+      "level": "L2",
+      "invoke": "Agent(subagent_type=<agent>, model=<models[].alias>)",
+      "_invoke_note": "Agent 툴의 model 파라미터는 alias 만 받는다. 전체 id(claude-opus-5)를 넘기면 거부된다",
+      "models": {
+        "opus":   { "id": "claude-opus-5",              "alias": "opus",   "verified": true },
+        "sonnet": { "id": "claude-sonnet-5",            "alias": "sonnet", "verified": true },
+        "haiku":  { "id": "claude-haiku-4-5-20251001",  "alias": "haiku",  "verified": true },
+        "fable":  { "id": "claude-fable-5",             "alias": "fable",  "verified": true,
+                    "_note": "tier 미배정 — 서열 미확정. 노드 override 로만 사용한다" }
+      },
+      "tiers": {
+        "T0": { "model": "opus",   "_note": "claude 는 opus 위 등급이 없다 — T1 과 같은 모델을 가리키는 자리 표시" },
+        "T1": { "model": "opus" },
+        "T2": { "model": "sonnet" },
+        "T3": { "model": "haiku" }
+      }
+    },
+    "codex": {
+      "level": "L1",
+      "invoke": "codex exec -m <models[].id> -c model_reasoning_effort=<tiers[].effort> -C <worktree>",
+      "_invoke_note": "spawn_subagent 없음(L1) — fanout·wave 병렬을 스스로 열 수 없다. 단발 호출로 소비한다",
+      "models": {
+        "astra": { "id": "gpt-6-astra", "verified": true,
+                   "_note": "codex exec 실호출로 확인 (2026-09-07). CLI 내장 카탈로그 등록 모델 — priority 1, minimal_client_version 0.153.0, context 272k/max 872k, effort low~ultra" },
+        "sol":   { "id": "gpt-5.6-sol",   "verified": true,
+                   "_note": "codex exec 실호출로 확인 (2026-08-13)" },
+        "terra": { "id": "gpt-5.6-terra", "verified": true,
+                   "_note": "~/.codex/config.toml 현재 기본값" },
+        "luna":  { "id": "gpt-5.6-luna",  "verified": true,
+                   "_note": "codex exec 실호출로 확인 (2026-08-13)" },
+        "5.4":       { "id": "gpt-5.4",           "verified": true,  "_note": "레거시 — 세션 기록 확인" },
+        "5.4-mini":  { "id": "gpt-5.4-mini",      "verified": true,  "_note": "레거시" },
+        "5.3-codex": { "id": "gpt-5.3-codex",     "verified": true,  "_note": "레거시 — config.toml 이 5.4 로 마이그레이션 고지" },
+        "5.2-codex": { "id": "gpt-5.2-codex",     "verified": true,  "_note": "레거시 — 5.3-codex 로 마이그레이션 고지" }
+      },
+      "_tier_axis_note": "codex 는 모델과 reasoning effort 두 손잡이를 함께 쓴다. 등급은 둘의 조합이다",
+      "tiers": {
+        "T0": { "model": "astra", "effort": "high" },
+        "T1": { "model": "sol",   "effort": "high" },
+        "T2": { "model": "terra", "effort": "medium" },
+        "T3": { "model": "luna",  "effort": "low" }
+      }
+    },
+    "host": {
+      "level": null,
+      "_level_note": "현재 메인 세션 런타임의 레벨을 그대로 따른다 — 정적으로 알 수 없으므로 lint 의 레벨 검사 대상이 아니다",
+      "invoke": "현재 메인 세션 런타임 그대로",
+      "_invoke_note": "모델·등급을 지정하지 않는다. 등급 지정을 지원하지 않는 런타임용 탈출구",
+      "models": {
+        "default": { "id": null, "verified": true, "_note": "런타임 기본 모델" }
+      },
+      "tiers": {
+        "T0": { "model": "default" },
+        "T1": { "model": "default" },
+        "T2": { "model": "default" },
+        "T3": { "model": "default" }
+      }
+    }
+  },
+
+  "runtime_budget": {
+    "_doc": "런타임별 사용량 상한. 상한을 넘으면 run 을 멈추고 fallback_profile 전환 여부를 묻는다. 이미 완료된 노드는 그대로 두고 남은 노드만 넘어간다. 근거: docs/decisions/0004-runtime-budget-failover.md",
+
+    "codex": {
+      "window": "weekly",
+      "threshold_percent": 80,
+      "fallback_profile": "claude-only",
+      "gate": true,
+      "re_ask_percent_step": 5,
+      "source": "~/.codex/sessions/**/rollout-*.jsonl 의 token_count.rate_limits — window_minutes=10080 이 주간 창이다. codex CLI 에 사용량 조회 명령이 없어 이 로그가 유일한 소스다",
+      "_override": "HARNESS_CODEX_USAGE_PERCENT 환경변수로 수동 주입 가능 (로그를 못 읽는 환경용)",
+      "_gate_note": "gate=false 로 두면 묻지 않고 즉시 전환한다",
+      "_tradeoff": "전환하면 codex 리뷰 노드가 claude 로 넘어가 교차 리뷰 이점을 잃는다 — claude-only 프로파일이 리뷰 노드를 T1 로 유지해 이를 일부 보상한다"
+    }
+  },
+
+  "_tier_doc": {
+    "T0": "T1 과 같은 판정 자리지만 런타임 최상위 모델을 쓴다. 신규 모델을 T1 전체를 옮기지 않고 일부 노드에만 시범 배치하는 슬롯이다",
+    "T1": "설계 판단·리뷰 판정. 틀리면 하위 노드 전부가 오염된다",
+    "T2": "규격이 정해진 산출물 생성. 틀려도 그 노드에서 잡힌다",
+    "T3": "기계적 변환. 컨벤션 문서가 답을 이미 갖고 있다"
+  },
+
+  "roles": {
+    "prd.author": {
+      "agent": "private-prd-writer", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebSearch", "WebFetch"] }
+    },
+    "prd.review": {
+      "agent": "private-prd-reviewer", "requires": "L0",
+      "exec": { "access": "read-only", "tools": ["Read", "Grep", "Glob", "Bash", "WebFetch"] },
+      "verifies": ["prd.author"]
+    },
+
+    "architect": {
+      "agent": "private-architect", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebSearch", "WebFetch"] }
+    },
+    "design.be": {
+      "agent": "private-senior-be", "requires": "L2",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebSearch", "WebFetch"] }
+    },
+    "design.fe": {
+      "agent": "private-senior-fe", "requires": "L2",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebSearch", "WebFetch"] }
+    },
+    "design.db": {
+      "agent": "private-senior-dba", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "design.review": {
+      "agent": "private-senior-pm", "requires": "L0",
+      "exec": { "access": "read-only", "tools": ["Read", "Grep", "Glob", "Bash"] },
+      "verifies": ["design.be", "design.fe", "design.db"]
+    },
+    "plan.coordinate": {
+      "agent": "private-tpm", "requires": "L2",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+
+    "implement.be": {
+      "agent": "private-be-implementer", "requires": "L1",
+      "exec": { "access": "full", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "implement.fe": {
+      "agent": "private-fe-implementer", "requires": "L1",
+      "exec": { "access": "full", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "implement.mysql": {
+      "agent": "private-mysql-implementer", "requires": "L1",
+      "exec": { "access": "full", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "implement.mongodb": {
+      "agent": "private-mongodb-implementer", "requires": "L1",
+      "exec": { "access": "full", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "implement.kafka": {
+      "agent": "private-kafka-implementer", "requires": "L1",
+      "exec": { "access": "full", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "implement.redis": {
+      "agent": "private-redis-implementer", "requires": "L1",
+      "exec": { "access": "full", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+
+    "review.code": {
+      "agent": "private-code-reviewer", "requires": "L0",
+      "exec": { "access": "read-only", "tools": ["Read", "Grep", "Glob", "Bash"] },
+      "verifies": ["implement.be", "implement.fe"]
+    },
+    "review.infra": {
+      "agent": "private-infra-reviewer", "requires": "L0",
+      "exec": { "access": "read-only", "tools": ["Read", "Grep", "Glob", "Bash"] },
+      "verifies": ["implement.mysql", "implement.mongodb", "implement.kafka", "implement.redis"]
+    },
+    "qa": {
+      "agent": "private-qa", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebFetch"] }
+    }
+  },
+
+  "_roles_doc": "role → agent 바인딩 + 실행 구성. exec.access 는 런타임 중립 접근 등급이고, 런타임 네이티브 키(claude permission_mode / codex sandbox)로의 번역은 orchestration/runner/adapters/*.toml 의 [access] 표가 한다. exec.tools 는 claude 전용이라 codex 노드에서는 제거되고 제거 사실이 journal 에 남는다. verifies 는 '이 role 이 대상 role 의 산출물을 검증한다' 는 선언이고, harness lint 가 둘의 runtime 이 다른지 검사한다 — 같으면 같은 맹점을 공유한다. qa 에는 verifies 를 두지 않는다: 산출물을 읽어 판정하는 게 아니라 배포된 기능을 실제로 구동해 PRD 시나리오로 검증하므로 맹점 공유 논리가 그대로 적용되지 않는다.",
+
+  "_bindings_doc": "각 항목은 {runtime, tier}. 명시되지 않은 role은 _default 로 떨어진다. role의 requires 가 runtime의 level 을 넘으면 강등이 필요하므로 _degrade 로 그 경로를 명시해야 한다 (없으면 lint 경고).",
+
+  "bindings": {
+    "cross-review": {
+      "_doc": "작성자와 리뷰어를 다른 런타임에 둔다 — 문서는 codex 작성/claude 리뷰, 코드는 claude 작성/codex 리뷰. 같은 모델이 쓰고 검수하면 같은 맹점을 공유한다",
+      "_default": { "runtime": "claude", "tier": "T2" },
+
+      "prd.author":      { "runtime": "codex",  "tier": "T2" },
+      "prd.review":      { "runtime": "claude", "tier": "T1" },
+
+      "architect":       { "runtime": "codex",  "tier": "T1" },
+      "design.be":       { "runtime": "codex",  "tier": "T1",
+                           "_degrade": "role requires L2(implementer 팀 지휘)이지만 이 노드는 설계 문서 작성만 수행한다. wave 지휘·fanout 소유권은 메인 세션(L2)에 둔다" },
+      "design.fe":       { "runtime": "codex",  "tier": "T1",
+                           "_degrade": "design.be 와 동일 — 설계 문서 작성만. wave 지휘는 메인 세션(L2)" },
+      "design.db":       { "runtime": "codex",  "tier": "T1" },
+      "design.review":   { "runtime": "claude", "tier": "T1" },
+      "plan.coordinate": { "runtime": "codex",  "tier": "T1",
+                           "_degrade": "role requires L2(도메인 간 wave 게이트 관리)이지만 codex 노드는 통합 DAG 문서 산출까지만. 게이트 실행은 메인 세션(L2)" },
+
+      "implement.be":      { "runtime": "claude", "tier": "T1" },
+      "implement.fe":      { "runtime": "claude", "tier": "T1" },
+      "implement.mysql":   { "runtime": "claude", "tier": "T3" },
+      "implement.mongodb": { "runtime": "claude", "tier": "T3" },
+      "implement.kafka":   { "runtime": "claude", "tier": "T3" },
+      "implement.redis":   { "runtime": "claude", "tier": "T3" },
+
+      "review.code":     { "runtime": "codex",  "tier": "T0",
+                           "_trial": "gpt-6-astra 시범 배치 (2026-09-07). read-only·단발·L0 게이트라 오판이 파일을 오염시키지 않는다. 나머지 codex T1 노드는 sol 유지" },
+      "review.infra":    { "runtime": "codex",  "tier": "T0",
+                           "_trial": "review.code 와 동일 — gpt-6-astra 시범 배치 (2026-09-07)" },
+      "qa":              { "runtime": "claude", "tier": "T2" }
+    },
+
+    "claude-only": {
+      "_doc": "codex 미설치·미인증 환경용. 교차 리뷰 이점을 잃으므로 리뷰 노드는 T1 을 유지한다",
+      "_cross_review_exempt": true,
+      "_exempt_reason": "런타임이 하나뿐이라 verifies 의 교차 런타임 조건을 구조적으로 만족할 수 없다. 면제를 선언 없이 허용하면 검사 자체가 무의미해지므로 여기에 명시한다 — cross-review 프로파일에서는 면제되지 않는다",
+      "_default": { "runtime": "claude", "tier": "T2" },
+
+      "architect":       { "runtime": "claude", "tier": "T1" },
+      "design.be":       { "runtime": "claude", "tier": "T1" },
+      "design.fe":       { "runtime": "claude", "tier": "T1" },
+      "design.db":       { "runtime": "claude", "tier": "T1" },
+      "design.review":   { "runtime": "claude", "tier": "T1" },
+      "prd.review":      { "runtime": "claude", "tier": "T1" },
+      "plan.coordinate": { "runtime": "claude", "tier": "T1" },
+      "implement.be":    { "runtime": "claude", "tier": "T1" },
+      "implement.fe":    { "runtime": "claude", "tier": "T1" },
+      "implement.mysql":   { "runtime": "claude", "tier": "T3" },
+      "implement.mongodb": { "runtime": "claude", "tier": "T3" },
+      "implement.kafka":   { "runtime": "claude", "tier": "T3" },
+      "implement.redis":   { "runtime": "claude", "tier": "T3" },
+      "review.code":     { "runtime": "claude", "tier": "T1" },
+      "review.infra":    { "runtime": "claude", "tier": "T1" }
+    },
+
+    "portable": {
+      "_doc": "모델·등급을 지정하지 않는다. 등급 지정을 지원하지 않는 런타임에서 하네스만 그대로 적용한다",
+      "_cross_review_exempt": true,
+      "_exempt_reason": "모든 role 이 host(현재 세션 런타임) 하나로 떨어지므로 verifies 의 교차 런타임 조건을 구조적으로 만족할 수 없다. 이 프로파일에서는 교차 리뷰 이점이 없다는 사실을 여기에 드러낸다 — 리뷰는 여전히 수행되지만 작성자와 같은 맹점을 공유한다",
+      "_default": { "runtime": "host", "tier": "T2" }
+    }
+  },
+
+  "active_profile": "cross-review"
+}
