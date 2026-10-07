@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Orca session dashboard public API stub for the RED phase."""
+from collections.abc import Mapping
+import sys
+
+
+STATUS_ORDER = ("blocked", "waiting_user", "stale", "running", "background", "idle")
+STALE_AFTER_MS = 900_000
+ERROR_WINDOW_LINES = 15
+AGENT_TITLE_GLYPHS = frozenset("✳◐◑◒◓✻✢✶")
+PIPELINE_KEYWORDS = {"로드맵": "private-roadmap"}
+
+
+class OrcaError(Exception):
+    """Raised when the Orca command cannot provide a usable result."""
+
+
+def clean_title(title: str | None) -> str | None:
+    raise NotImplementedError("clean_title is not implemented")
+
+
+def extract_recap(tail_lines: list[str]) -> str | None:
+    raise NotImplementedError("extract_recap is not implemented")
+
+
+def last_reply_from_tail(tail_lines: list[str]) -> str | None:
+    raise NotImplementedError("last_reply_from_tail is not implemented")
+
+
+def is_tail_working(tail_lines: list[str]) -> bool:
+    raise NotImplementedError("is_tail_working is not implemented")
+
+
+def summarize(tail_lines: list[str], last_message: str | None) -> dict:
+    raise NotImplementedError("summarize is not implemented")
+
+
+def parse_step_headings(markdown: str) -> list[int]:
+    raise NotImplementedError("parse_step_headings is not implemented")
+
+
+def detect_pipeline(texts: list[str], pipelines: dict[str, list[int]]) -> str | None:
+    raise NotImplementedError("detect_pipeline is not implemented")
+
+
+def estimate_progress(
+    *,
+    comment: str | None,
+    agent_state: str | None,
+    texts: list[str],
+    pipelines: dict[str, list[int]],
+) -> dict:
+    raise NotImplementedError("estimate_progress is not implemented")
+
+
+def classify_status(
+    *,
+    agent_state: str | None,
+    main_state: str | None,
+    last_message: str | None,
+    tail_lines: list[str],
+    last_output_at: int | None,
+    now_ms: int,
+) -> dict:
+    raise NotImplementedError("classify_status is not implemented")
+
+
+def build_snapshot(
+    worktrees: list[dict],
+    terminals: list[dict],
+    tails: dict[str, list[str]],
+    *,
+    now_ms: int,
+    pipelines: dict[str, list[int]],
+) -> dict:
+    raise NotImplementedError("build_snapshot is not implemented")
+
+
+def orca_command(env: Mapping[str, str]) -> list[str]:
+    raise NotImplementedError("orca_command is not implemented")
+
+
+def run_orca(command: list[str], args: list[str], timeout: float = 15) -> dict:
+    raise NotImplementedError("run_orca is not implemented")
+
+
+def load_pipelines(skills_dir: str) -> dict[str, list[int]]:
+    raise NotImplementedError("load_pipelines is not implemented")
+
+
+def collect(command: list[str], skills_dir: str, now_ms: int) -> dict:
+    raise NotImplementedError("collect is not implemented")
+
+
+def main(argv: list[str] | None = None) -> int:
+    raise NotImplementedError("CLI is not implemented")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
