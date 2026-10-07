@@ -1,46 +1,238 @@
 #!/usr/bin/env python3
-"""Orca session dashboard public API stub for the RED phase."""
-from collections.abc import Mapping
-import sys
+"""orca-dashboard — Orca 세션 실시간 대시보드 (읽기 전용)
 
+  orca-dashboard snapshot                          현재 세션 스냅샷 JSON 1회 출력 (exit 1 = Orca 수집 실패)
+  orca-dashboard serve [--port 7788] [--interval 3]
+                                                   127.0.0.1 에 대시보드 페이지 + /api/snapshot 제공
+
+환경 변수
+  ORCA_CLI_COMMAND   Orca CLI 실행 명령 (shlex 분리, 기본 "orca")
+
+호출하는 Orca 명령은 읽기 전용뿐이다: worktree ps · terminal list · terminal read.
+"""
+from collections.abc import Mapping
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import threading
+import time
+
+
+HARNESS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SKILLS_DIR = os.path.join(HARNESS, "skills")
 
 STATUS_ORDER = ("blocked", "waiting_user", "stale", "running", "background", "idle")
 STALE_AFTER_MS = 900_000
 ERROR_WINDOW_LINES = 15
+WORKING_WINDOW_LINES = 8
+SUMMARY_MAX_CHARS = 240
+REASON_MAX_CHARS = 160
+TAIL_LIMIT = 80
 AGENT_TITLE_GLYPHS = frozenset("✳◐◑◒◓✻✢✶")
 PIPELINE_KEYWORDS = {"로드맵": "private-roadmap"}
 
+TITLE_GLYPH_PREFIX_RE = re.compile(r"^[^\w.\/\[(]+")
+RECAP_PREFIX = "※ recap:"
+RECAP_TAIL = "(disable recaps in /config)"
+BLOCK_BREAK_PREFIXES = ("⏺", "✻", "❯", "※", "─")
+REPLY_END_PREFIXES = ("✻", "❯", "※", "─")
+SPINNER_RE = re.compile(r"^[✢✳✶✻✽·*]\s+\S+…")
+STEP_HEADING_RE = re.compile(r"^## Step (\d+)", re.M)
+STEP_MENTION_RE = re.compile(r"Step\s*(\d+)")
+PIPELINE_NAME_RE = re.compile(r"private-[a-z][a-z-]*")
+COMMENT_PROGRESS_RE = re.compile(r"진행\s*(\d{1,3})\s*%")
+COMPLETION_RE = re.compile(r"머지했|merged=true|완료했습니다|모두 끝났습니다")
+ERROR_LINE_RE = re.compile(
+    r"BUILD FAILED|(?<![A-Za-z0-9_])FAILED(?![A-Za-z0-9_])|Traceback|Error:|exit code [1-9]"
+)
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n")
+REQUEST_RE = re.compile(
+    r"지시하시면|알려\s?주세요|할까요|하시겠어요|정해\s?주세요|선택해\s?주세요"
+    r"|승인해\s?주세요|확인해\s?주세요|\?\s*$"
+)
+SHELLS_RUNNING_RE = re.compile(r"(\d+) shells? still running")
+KNOWN_AGENT_STATES = ("working", "done", "idle", None)
+
 
 class OrcaError(Exception):
-    """Raised when the Orca command cannot provide a usable result."""
+    """Orca CLI 가 사용 가능한 결과를 주지 못했을 때."""
+
+
+# ── 순수 판정 함수 (I/O·현재 시각 조회 없음) ─────────────────────────────
 
 
 def clean_title(title: str | None) -> str | None:
-    raise NotImplementedError("clean_title is not implemented")
+    """터미널 제목 앞의 TUI 글리프·공백 제거. 남는 것이 없으면 None."""
+    if not title:
+        return None
+    cleaned = TITLE_GLYPH_PREFIX_RE.sub("", title).strip()
+    return cleaned or None
+
+
+def _non_empty(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.strip()]
+
+
+def _last_index(lines: list[str], predicate) -> int | None:
+    for index in range(len(lines) - 1, -1, -1):
+        if predicate(lines[index]):
+            return index
+    return None
+
+
+def _starts_with_any(line: str, prefixes: tuple[str, ...]) -> bool:
+    return line.strip().startswith(prefixes)
+
+
+def _recap_index(tail_lines: list[str]) -> int | None:
+    return _last_index(tail_lines, lambda line: line.lstrip().startswith(RECAP_PREFIX))
 
 
 def extract_recap(tail_lines: list[str]) -> str | None:
-    raise NotImplementedError("extract_recap is not implemented")
+    """마지막 `※ recap:` 블록(들여쓰기 연속 줄 포함)을 한 줄로 반환."""
+    start = _recap_index(tail_lines)
+    if start is None:
+        return None
+    pieces = [tail_lines[start].lstrip()[len(RECAP_PREFIX):].strip()]
+    for line in tail_lines[start + 1:]:
+        is_continuation = (
+            line[:1].isspace()
+            and line.strip()
+            and not _starts_with_any(line, BLOCK_BREAK_PREFIXES)
+        )
+        if not is_continuation:
+            break
+        pieces.append(line.strip())
+    text = " ".join(piece for piece in pieces if piece).strip()
+    if text.endswith(RECAP_TAIL):
+        text = text[: -len(RECAP_TAIL)].strip()
+    return text or None
 
 
 def last_reply_from_tail(tail_lines: list[str]) -> str | None:
-    raise NotImplementedError("last_reply_from_tail is not implemented")
+    """마지막 `⏺` 응답 블록 텍스트. agents 미등록 터미널의 마지막 응답 대용."""
+    start = _last_index(tail_lines, lambda line: line.strip().startswith("⏺"))
+    if start is None:
+        return None
+    block = [tail_lines[start].strip()[1:].strip()]
+    for line in tail_lines[start + 1:]:
+        if _starts_with_any(line, REPLY_END_PREFIXES):
+            break
+        block.append(line.strip())
+    text = "\n".join(block).strip()
+    return text or None
 
 
 def is_tail_working(tail_lines: list[str]) -> bool:
-    raise NotImplementedError("is_tail_working is not implemented")
+    """최근 8줄에 Claude 스피너(진행 중) 줄이 있는지."""
+    for line in _non_empty(tail_lines)[-WORKING_WINDOW_LINES:]:
+        stripped = line.strip()
+        if SPINNER_RE.match(stripped) and "(" in stripped and "done" not in stripped:
+            return True
+    return False
+
+
+def _first_line(text: str | None) -> str | None:
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:SUMMARY_MAX_CHARS]
+    return None
 
 
 def summarize(tail_lines: list[str], last_message: str | None) -> dict:
-    raise NotImplementedError("summarize is not implemented")
+    """신선한 recap → 마지막 메시지 첫 줄 → 낡은 recap 순으로 요약 선택."""
+    recap = extract_recap(tail_lines)
+    if recap is not None:
+        recap_at = _recap_index(tail_lines)
+        reply_after_recap = any(
+            line.strip().startswith("⏺") for line in tail_lines[recap_at + 1:]
+        )
+        if not reply_after_recap:
+            return {"text": recap, "source": "recap"}
+    message = _first_line(last_message)
+    if message is not None:
+        return {"text": message, "source": "lastMessage"}
+    if recap is not None:
+        return {"text": recap, "source": "recap"}
+    return {"text": None, "source": None}
 
 
 def parse_step_headings(markdown: str) -> list[int]:
-    raise NotImplementedError("parse_step_headings is not implemented")
+    """`## Step N` 헤딩 번호를 문서 순서대로 중복 없이."""
+    steps: list[int] = []
+    for match in STEP_HEADING_RE.finditer(markdown):
+        number = int(match.group(1))
+        if number not in steps:
+            steps.append(number)
+    return steps
+
+
+def _texts_newest_first(texts: list[str]) -> list[str]:
+    return [text for text in reversed(texts) if text]
 
 
 def detect_pipeline(texts: list[str], pipelines: dict[str, list[int]]) -> str | None:
-    raise NotImplementedError("detect_pipeline is not implemented")
+    """최신 텍스트부터 언급된 등록 파이프라인 이름(없으면 키워드 매핑)."""
+    newest_first = _texts_newest_first(texts)
+    for text in newest_first:
+        for name in reversed(PIPELINE_NAME_RE.findall(text)):
+            if name in pipelines:
+                return name
+    for text in newest_first:
+        for keyword, name in PIPELINE_KEYWORDS.items():
+            if keyword in text and name in pipelines:
+                return name
+    return None
+
+
+def _round_half_up_percent(index: int, total: int) -> int:
+    return (2 * index * 100 + total) // (2 * total)
+
+
+def _latest_step(texts: list[str]) -> int | None:
+    for text in _texts_newest_first(texts):
+        mentions = STEP_MENTION_RE.findall(text)
+        if mentions:
+            return int(mentions[-1])
+    return None
+
+
+def _comment_progress(comment: str | None) -> dict | None:
+    match = COMMENT_PROGRESS_RE.search(comment or "")
+    if match is None or not 0 <= int(match.group(1)) <= 100:
+        return None
+    percent = int(match.group(1))
+    return {"percent": percent, "basis": f"worktree 코멘트: 진행 {percent}%"}
+
+
+def _completion_progress(agent_state: str | None, texts: list[str]) -> dict | None:
+    if agent_state != "done":
+        return None
+    latest = next((text for text in _texts_newest_first(texts) if text.strip()), None)
+    if latest is None or not COMPLETION_RE.search(latest):
+        return None
+    return {"percent": 100, "basis": "완료 보고"}
+
+
+def _pipeline_progress(texts: list[str], pipelines: dict[str, list[int]]) -> dict | None:
+    pipeline = detect_pipeline(texts, pipelines)
+    step = _latest_step(texts)
+    if pipeline is None or step is None:
+        return None
+    steps = pipelines[pipeline]
+    if step not in steps:
+        return None
+    index = steps.index(step)
+    return {
+        "percent": _round_half_up_percent(index, len(steps)),
+        "basis": f"/{pipeline} Step {step} ({index + 1}/{len(steps)}단계 진행 중)",
+    }
 
 
 def estimate_progress(
@@ -50,7 +242,43 @@ def estimate_progress(
     texts: list[str],
     pipelines: dict[str, list[int]],
 ) -> dict:
-    raise NotImplementedError("estimate_progress is not implemented")
+    """근거가 있을 때만 진행률. 근거가 없으면 percent None ('산정 불가')."""
+    return (
+        _comment_progress(comment)
+        or _completion_progress(agent_state, texts)
+        or _pipeline_progress(texts, pipelines)
+        or {"percent": None, "basis": "산정 불가"}
+    )
+
+
+def _request_sentence(last_message: str | None) -> str | None:
+    if not last_message:
+        return None
+    sentences = [part.strip() for part in SENTENCE_SPLIT_RE.split(last_message)]
+    matches = [sentence for sentence in sentences if sentence and REQUEST_RE.search(sentence)]
+    return matches[-1] if matches else None
+
+
+def _error_line(tail_lines: list[str]) -> str | None:
+    window = _non_empty(tail_lines)[-ERROR_WINDOW_LINES:]
+    index = _last_index(window, lambda line: ERROR_LINE_RE.search(line) is not None)
+    return None if index is None else window[index].strip()[:REASON_MAX_CHARS]
+
+
+def _silent_ms(last_output_at: int | None, now_ms: int) -> int | None:
+    return None if last_output_at is None else now_ms - last_output_at
+
+
+def _background_shells(tail_lines: list[str]) -> int | None:
+    index = _last_index(tail_lines, lambda line: line.strip().startswith("✻"))
+    if index is None:
+        return None
+    match = SHELLS_RUNNING_RE.search(tail_lines[index])
+    return int(match.group(1)) if match else None
+
+
+def _status(status: str, reason: str) -> dict:
+    return {"status": status, "reason": reason}
 
 
 def classify_status(
@@ -62,7 +290,197 @@ def classify_status(
     last_output_at: int | None,
     now_ms: int,
 ) -> dict:
-    raise NotImplementedError("classify_status is not implemented")
+    """세션 상태 판정 — blocked > waiting_user > stale > running > background > idle 근거 순."""
+    request = _request_sentence(last_message)
+    if agent_state not in KNOWN_AGENT_STATES:
+        return _status("waiting_user", request or f"에이전트 상태: {agent_state}")
+
+    silent_ms = _silent_ms(last_output_at, now_ms)
+    is_silent = silent_ms is not None and silent_ms >= STALE_AFTER_MS
+    error_line = _error_line(tail_lines)
+    if error_line and (agent_state != "working" or is_silent):
+        return _status("blocked", error_line)
+
+    if agent_state == "working":
+        if is_silent:
+            return _status("stale", f"작업 중인데 {silent_ms // 60_000}분째 출력 없음")
+        if main_state == "done":
+            return _status("background", "메인 응답 종료 — 서브에이전트·백그라운드 작업 진행 중")
+        return _status("running", f"최근 실패 출력: {error_line}" if error_line else "작업 중")
+
+    if request:
+        return _status("waiting_user", request)
+    shells = _background_shells(tail_lines)
+    if shells is not None:
+        return _status("background", f"백그라운드 셸 {shells}개 실행 중")
+    return _status("idle", "응답 완료 — 다음 지시 대기")
+
+
+# ── 스냅샷 조립 ─────────────────────────────────────────────────────────
+
+
+def _normalize_branch(branch: str | None) -> str:
+    name = (branch or "").removeprefix("refs/heads/")
+    return name or "(detached)"
+
+
+def _pull_request(linked: dict | None) -> dict | None:
+    if not linked:
+        return None
+    return {"number": linked.get("number"), "state": linked.get("state")}
+
+
+def _pane_key(terminal: dict) -> str:
+    return f"{terminal.get('tabId')}:{terminal.get('leafId')}"
+
+
+def _is_agent_title(title: str | None) -> bool:
+    return bool(title) and title[0] in AGENT_TITLE_GLYPHS
+
+
+def _session(
+    *,
+    session_id: str,
+    kind: str,
+    name: str | None,
+    worktree: dict,
+    terminal: dict | None,
+    tail: list[str],
+    agent_type: str | None,
+    agent_state: str | None,
+    main_state: str | None,
+    tool_name: str | None,
+    last_message: str | None,
+    prompt_text: str | None,
+    last_output_at: int | None,
+    now_ms: int,
+    pipelines: dict[str, list[int]],
+) -> dict:
+    summary = summarize(tail, last_message)
+    progress = estimate_progress(
+        comment=worktree.get("comment"),
+        agent_state=agent_state,
+        texts=[prompt_text, last_message, summary["text"]],
+        pipelines=pipelines,
+    )
+    status = classify_status(
+        agent_state=agent_state,
+        main_state=main_state,
+        last_message=last_message,
+        tail_lines=tail,
+        last_output_at=last_output_at,
+        now_ms=now_ms,
+    )
+    return {
+        "id": session_id,
+        "kind": kind,
+        "name": name,
+        "worktreeId": worktree.get("worktreeId"),
+        "repo": worktree.get("repo"),
+        "branch": _normalize_branch(worktree.get("branch")),
+        "path": worktree.get("path"),
+        "terminalHandle": terminal.get("handle") if terminal else None,
+        "agentType": agent_type,
+        "agentState": agent_state,
+        "mainState": main_state,
+        "toolName": tool_name,
+        "summary": summary,
+        "progress": progress,
+        "status": status["status"],
+        "reason": status["reason"],
+        "lastOutputAt": last_output_at,
+        "idleSeconds": None if last_output_at is None else (now_ms - last_output_at) // 1000,
+        "pr": _pull_request(worktree.get("linkedPR")),
+        "comment": worktree.get("comment"),
+        "workspaceStatus": worktree.get("workspaceStatus"),
+    }
+
+
+def _agent_session(agent, worktree, terminal, tails, now_ms, pipelines) -> dict:
+    tail = tails.get(terminal["handle"], []) if terminal else []
+    terminal_output_at = terminal.get("lastOutputAt") if terminal else None
+    return _session(
+        session_id=agent.get("paneKey"),
+        kind="agent",
+        name=clean_title(terminal.get("title") if terminal else None) or worktree.get("displayName"),
+        worktree=worktree,
+        terminal=terminal,
+        tail=tail,
+        agent_type=agent.get("agentType"),
+        agent_state=agent.get("state"),
+        main_state=(agent.get("mainAgent") or {}).get("state"),
+        tool_name=agent.get("toolName"),
+        last_message=agent.get("lastAssistantMessage"),
+        prompt_text=agent.get("prompt"),
+        last_output_at=terminal_output_at if terminal_output_at is not None else agent.get("updatedAt"),
+        now_ms=now_ms,
+        pipelines=pipelines,
+    )
+
+
+def _terminal_session(terminal, worktree, tails, now_ms, pipelines) -> dict:
+    tail = tails.get(terminal["handle"], [])
+    return _session(
+        session_id=terminal["handle"],
+        kind="terminal",
+        name=clean_title(terminal.get("title")),
+        worktree=worktree,
+        terminal=terminal,
+        tail=tail,
+        agent_type=None,
+        agent_state="working" if is_tail_working(tail) else "done",
+        main_state=None,
+        tool_name=None,
+        last_message=last_reply_from_tail(tail),
+        prompt_text=terminal.get("title"),
+        last_output_at=terminal.get("lastOutputAt"),
+        now_ms=now_ms,
+        pipelines=pipelines,
+    )
+
+
+def _sort_key(session: dict):
+    last = session["lastOutputAt"]
+    return (STATUS_ORDER.index(session["status"]), last is None, -(last or 0))
+
+
+def _worktree_entry(worktree: dict) -> dict:
+    return {
+        "worktreeId": worktree.get("worktreeId"),
+        "repo": worktree.get("repo"),
+        "branch": _normalize_branch(worktree.get("branch")),
+        "displayName": worktree.get("displayName"),
+        "path": worktree.get("path"),
+        "liveTerminalCount": worktree.get("liveTerminalCount") or 0,
+        "pr": _pull_request(worktree.get("linkedPR")),
+    }
+
+
+def _kpi(sessions: list[dict]) -> dict:
+    count = {status: 0 for status in STATUS_ORDER}
+    for session in sessions:
+        count[session["status"]] += 1
+    return {
+        "total": len(sessions),
+        "running": count["running"] + count["background"],
+        "waitingUser": count["waiting_user"],
+        "blockedOrStale": count["blocked"] + count["stale"],
+    }
+
+
+def agent_terminal_handles(worktrees: list[dict], terminals: list[dict]) -> list[str]:
+    """tail 이 필요한 터미널 — agent 와 조인되거나 제목이 에이전트 글리프인 것."""
+    pane_keys = {
+        agent.get("paneKey")
+        for worktree in worktrees
+        if not worktree.get("isArchived")
+        for agent in worktree.get("agents") or []
+    }
+    return [
+        terminal["handle"]
+        for terminal in terminals
+        if _pane_key(terminal) in pane_keys or _is_agent_title(terminal.get("title"))
+    ]
 
 
 def build_snapshot(
@@ -73,27 +491,496 @@ def build_snapshot(
     now_ms: int,
     pipelines: dict[str, list[int]],
 ) -> dict:
-    raise NotImplementedError("build_snapshot is not implemented")
+    """Orca worktree·terminal 원본을 세션 단위 스냅샷으로 조립."""
+    active = [worktree for worktree in worktrees if not worktree.get("isArchived")]
+    terminals_by_pane = {_pane_key(terminal): terminal for terminal in terminals}
+    joined_handles: set[str] = set()
+    sessions_by_worktree: dict[str, list[dict]] = {worktree.get("worktreeId"): [] for worktree in active}
+
+    for worktree in active:
+        for agent in worktree.get("agents") or []:
+            terminal = terminals_by_pane.get(agent.get("paneKey"))
+            if terminal:
+                joined_handles.add(terminal["handle"])
+            sessions_by_worktree[worktree.get("worktreeId")].append(
+                _agent_session(agent, worktree, terminal, tails, now_ms, pipelines)
+            )
+
+    worktrees_by_id = {worktree.get("worktreeId"): worktree for worktree in active}
+    for terminal in terminals:
+        worktree = worktrees_by_id.get(terminal.get("worktreeId"))
+        if worktree is None or terminal["handle"] in joined_handles:
+            continue
+        if _is_agent_title(terminal.get("title")):
+            sessions_by_worktree[worktree.get("worktreeId")].append(
+                _terminal_session(terminal, worktree, tails, now_ms, pipelines)
+            )
+
+    sessions = sorted(
+        (session for group in sessions_by_worktree.values() for session in group), key=_sort_key
+    )
+    sessionless = [worktree for worktree in active if not sessions_by_worktree[worktree.get("worktreeId")]]
+    has_terminal = [(worktree.get("liveTerminalCount") or 0) > 0 for worktree in sessionless]
+    return {
+        "generatedAt": now_ms,
+        "error": None,
+        "kpi": _kpi(sessions),
+        "sessions": sessions,
+        "shellOnly": [_worktree_entry(w) for w, live in zip(sessionless, has_terminal) if live],
+        "noTerminal": [_worktree_entry(w) for w, live in zip(sessionless, has_terminal) if not live],
+    }
+
+
+def error_snapshot(message: str, now_ms: int) -> dict:
+    return {
+        "generatedAt": now_ms,
+        "error": message,
+        "kpi": {"total": 0, "running": 0, "waitingUser": 0, "blockedOrStale": 0},
+        "sessions": [],
+        "shellOnly": [],
+        "noTerminal": [],
+    }
+
+
+# ── 수집 (I/O) ──────────────────────────────────────────────────────────
 
 
 def orca_command(env: Mapping[str, str]) -> list[str]:
-    raise NotImplementedError("orca_command is not implemented")
+    configured = (env.get("ORCA_CLI_COMMAND") or "").strip()
+    return shlex.split(configured) if configured else ["orca"]
 
 
 def run_orca(command: list[str], args: list[str], timeout: float = 15) -> dict:
-    raise NotImplementedError("run_orca is not implemented")
+    """Orca CLI 를 argv 로 실행(셸 미사용)하고 result 객체 반환."""
+    argv = [*command, *args, "--json"]
+    label = " ".join(args)
+    try:
+        process = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise OrcaError(f"Orca CLI 실행 파일 없음: {command[0] if command else '(빈 명령)'}") from None
+    except subprocess.TimeoutExpired:
+        raise OrcaError(f"orca {label} 타임아웃 ({timeout}초)") from None
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "").strip()[-300:]
+        raise OrcaError(f"orca {label} 실패 (exit {process.returncode}): {detail}")
+    try:
+        payload = json.loads(process.stdout)
+    except json.JSONDecodeError as error:
+        raise OrcaError(f"orca {label} JSON 파싱 실패: {error}") from None
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        detail = payload.get("error") if isinstance(payload, dict) else payload
+        raise OrcaError(f"orca {label} ok=false: {detail}")
+    return payload.get("result") or {}
 
 
 def load_pipelines(skills_dir: str) -> dict[str, list[int]]:
-    raise NotImplementedError("load_pipelines is not implemented")
+    """skills/*/SKILL.md 중 `## Step` 헤딩이 있는 스킬 → 단계 번호 목록."""
+    pipelines: dict[str, list[int]] = {}
+    if not os.path.isdir(skills_dir):
+        return pipelines
+    for name in sorted(os.listdir(skills_dir)):
+        path = os.path.join(skills_dir, name, "SKILL.md")
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            steps = parse_step_headings(handle.read())
+        if steps:
+            pipelines[name] = steps
+    return pipelines
 
 
 def collect(command: list[str], skills_dir: str, now_ms: int) -> dict:
-    raise NotImplementedError("collect is not implemented")
+    """worktree ps → terminal list → 에이전트 터미널 tail 읽기 → build_snapshot."""
+    worktrees = run_orca(command, ["worktree", "ps"]).get("worktrees") or []
+    terminals = run_orca(command, ["terminal", "list"]).get("terminals") or []
+    tails: dict[str, list[str]] = {}
+    for handle in agent_terminal_handles(worktrees, terminals):
+        try:
+            result = run_orca(command, ["terminal", "read", "--terminal", handle, "--limit", str(TAIL_LIMIT)])
+            tail = (result.get("terminal") or {}).get("tail") or []
+            tails[handle] = [str(line) for line in tail] if isinstance(tail, list) else str(tail).splitlines()
+        except OrcaError:
+            tails[handle] = []
+    return build_snapshot(
+        worktrees, terminals, tails, now_ms=now_ms, pipelines=load_pipelines(skills_dir)
+    )
+
+
+def now_millis() -> int:
+    return int(time.time() * 1000)
+
+
+# ── serve ───────────────────────────────────────────────────────────────
+
+
+class SnapshotStore:
+    """직전 성공 스냅샷을 유지하고, 실패 시 error 만 덧씌운다."""
+
+    def __init__(self, interval: float):
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._snapshot = error_snapshot("아직 수집 전", now_millis())
+        self._last_success_at: int | None = None
+
+    def refresh(self, command: list[str]) -> None:
+        now_ms = now_millis()
+        try:
+            snapshot = collect(command, SKILLS_DIR, now_ms)
+        except OrcaError as error:
+            with self._lock:
+                self._snapshot = {**self._snapshot, "error": str(error)}
+            return
+        with self._lock:
+            self._snapshot = snapshot
+            self._last_success_at = now_ms
+
+    def payload(self) -> dict:
+        with self._lock:
+            return {**self._snapshot, "interval": self._interval, "lastSuccessAt": self._last_success_at}
+
+
+def _poll_forever(store: SnapshotStore, command: list[str], interval: float) -> None:
+    while True:
+        time.sleep(interval)
+        store.refresh(command)
+
+
+def _handler_for(store: SnapshotStore):
+    class DashboardHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server 규약
+            path = self.path.split("?", 1)[0]
+            if path == "/":
+                self._send(200, "text/html; charset=utf-8", PAGE_HTML.encode("utf-8"))
+            elif path == "/api/snapshot":
+                body = json.dumps(store.payload(), ensure_ascii=False).encode("utf-8")
+                self._send(200, "application/json; charset=utf-8", body)
+            else:
+                self._send(404, "text/plain; charset=utf-8", b"not found")
+
+        def _send(self, status: int, content_type: str, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):  # noqa: A002 — 접근 로그 생략
+            return
+
+    return DashboardHandler
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────
+
+
+def usage() -> int:
+    print("usage: " + (__doc__ or "").strip(), file=sys.stderr)
+    return 2
+
+
+def cmd_snapshot(args: list[str]) -> int:
+    if args:
+        return usage()
+    now_ms = now_millis()
+    try:
+        snapshot = collect(orca_command(os.environ), SKILLS_DIR, now_ms)
+    except OrcaError as error:
+        print(json.dumps(error_snapshot(str(error), now_ms), ensure_ascii=False))
+        return 1
+    print(json.dumps(snapshot, ensure_ascii=False))
+    return 0
+
+
+def _parse_serve_args(args: list[str]) -> tuple[int, float] | None:
+    options = {"--port": "7788", "--interval": "3"}
+    remaining = list(args)
+    while remaining:
+        flag = remaining.pop(0)
+        if flag not in options or not remaining:
+            return None
+        options[flag] = remaining.pop(0)
+    try:
+        port, interval = int(options["--port"]), float(options["--interval"])
+    except ValueError:
+        return None
+    if not 0 < port < 65536 or interval <= 0:
+        return None
+    return port, interval
+
+
+def cmd_serve(args: list[str]) -> int:
+    parsed = _parse_serve_args(args)
+    if parsed is None:
+        return usage()
+    port, interval = parsed
+    command = orca_command(os.environ)
+    store = SnapshotStore(interval)
+    store.refresh(command)
+    threading.Thread(target=_poll_forever, args=(store, command, interval), daemon=True).start()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(store))
+    server.daemon_threads = True
+    print(f"orca-dashboard: http://127.0.0.1:{port}/ (interval {interval}s)", file=sys.stderr, flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+COMMANDS = {"snapshot": cmd_snapshot, "serve": cmd_serve}
 
 
 def main(argv: list[str] | None = None) -> int:
-    raise NotImplementedError("CLI is not implemented")
+    arguments = sys.argv[1:] if argv is None else argv
+    if not arguments or arguments[0] not in COMMANDS:
+        return usage()
+    return COMMANDS[arguments[0]](arguments[1:])
+
+
+# ── 페이지 (인라인 HTML/CSS/JS, 외부 리소스 없음) ───────────────────────
+
+PAGE_HTML = r"""<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orca 세션 대시보드</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --surface: #ffffff; --border: #dfe3e8;
+  --text: #1b1f24; --muted: #5b6470; --track: #e7eaee; --accent: #2f6fde;
+  --blocked-bg: #fde7e7; --blocked-fg: #b42318;
+  --waiting-bg: #fff1e0; --waiting-fg: #b54708;
+  --stale-bg: #fdf6d8; --stale-fg: #8a6a00;
+  --running-bg: #e3f6e9; --running-fg: #18794e;
+  --background-bg: #e5efff; --background-fg: #1d4ed8;
+  --idle-bg: #eceef1; --idle-fg: #4b5563;
+  --banner-bg: #fde7e7; --banner-fg: #8f1d14;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --surface: #181c22; --border: #2a3039;
+    --text: #e6e9ed; --muted: #9aa4b1; --track: #2a3039; --accent: #6ea0ff;
+    --blocked-bg: #3a1716; --blocked-fg: #ff8a80;
+    --waiting-bg: #3a2610; --waiting-fg: #ffb366;
+    --stale-bg: #362e0c; --stale-fg: #f2d35b;
+    --running-bg: #10301f; --running-fg: #5fd394;
+    --background-bg: #13254a; --background-fg: #8db4ff;
+    --idle-bg: #262b33; --idle-fg: #b0b8c4;
+    --banner-bg: #3a1716; --banner-fg: #ffb4ab;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  padding: 16px; max-width: 1200px; margin: 0 auto; overflow-x: hidden; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+h1 { font-size: 18px; margin: 0; }
+.muted { color: var(--muted); }
+.banner { display: none; margin: 12px 0; padding: 10px 12px; border-radius: 8px;
+  background: var(--banner-bg); color: var(--banner-fg); overflow-wrap: anywhere; white-space: pre-wrap; }
+.banner.show { display: block; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 12px 0; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.kpi .value { font-size: 24px; font-weight: 700; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 10px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  min-width: 0; overflow-wrap: anywhere; }
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.name { font-weight: 600; font-size: 15px; }
+.badge { flex: none; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.badge.blocked { background: var(--blocked-bg); color: var(--blocked-fg); }
+.badge.waiting_user { background: var(--waiting-bg); color: var(--waiting-fg); }
+.badge.stale { background: var(--stale-bg); color: var(--stale-fg); }
+.badge.running { background: var(--running-bg); color: var(--running-fg); }
+.badge.background { background: var(--background-bg); color: var(--background-fg); }
+.badge.idle { background: var(--idle-bg); color: var(--idle-fg); }
+.card.blocked { border-left: 4px solid var(--blocked-fg); }
+.card.waiting_user { border-left: 4px solid var(--waiting-fg); }
+.card.stale { border-left: 4px solid var(--stale-fg); }
+.meta { font-size: 12px; color: var(--muted); }
+.row { margin-top: 6px; }
+.reason { font-weight: 500; }
+.summary { white-space: pre-wrap; }
+.progress { margin-top: 8px; }
+.bar { height: 6px; background: var(--track); border-radius: 999px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); }
+details { margin-top: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; }
+summary { cursor: pointer; font-weight: 600; }
+details ul { margin: 8px 0 0; padding-left: 18px; }
+details li { overflow-wrap: anywhere; }
+.empty { padding: 24px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Orca 세션 대시보드</h1>
+  <span id="updated" class="muted">불러오는 중…</span>
+</header>
+<div id="banner" class="banner" role="alert"></div>
+<section class="kpis" aria-label="요약">
+  <div class="kpi"><div class="muted">전체</div><div class="value" id="kpi-total">-</div></div>
+  <div class="kpi"><div class="muted">실행 중</div><div class="value" id="kpi-running">-</div></div>
+  <div class="kpi"><div class="muted">사용자 대기</div><div class="value" id="kpi-waiting">-</div></div>
+  <div class="kpi"><div class="muted">막힘/정체</div><div class="value" id="kpi-blocked">-</div></div>
+</section>
+<section id="cards" class="cards" aria-label="세션"></section>
+<details id="shell-only"><summary id="shell-only-title">셸만 열린 worktree</summary><ul id="shell-only-list"></ul></details>
+<details id="no-terminal"><summary id="no-terminal-title">터미널 없는 worktree</summary><ul id="no-terminal-list"></ul></details>
+<script>
+"use strict";
+const STATUS_LABEL = {blocked: "막힘", waiting_user: "사용자 대기", stale: "정체",
+  running: "실행 중", background: "백그라운드", idle: "유휴"};
+let latest = null;
+let pollMs = 3000;
+let fetchError = null;
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+function ago(ms) {
+  if (ms === null || ms === undefined) return "-";
+  const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (seconds < 60) return seconds + "초 전";
+  if (seconds < 3600) return Math.floor(seconds / 60) + "분 전";
+  return Math.floor(seconds / 3600) + "시간 " + Math.floor((seconds % 3600) / 60) + "분 전";
+}
+
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString("ko-KR", {hour12: false});
+}
+
+function prText(pr) {
+  return pr ? "PR #" + pr.number + " (" + pr.state + ")" : null;
+}
+
+function card(session) {
+  const node = el("article", "card " + session.status);
+  const head = el("div", "card-head");
+  head.appendChild(el("div", "name", session.name || "(이름 없음)"));
+  head.appendChild(el("span", "badge " + session.status, STATUS_LABEL[session.status] || session.status));
+  node.appendChild(head);
+  node.appendChild(el("div", "meta", [session.repo || "-", session.branch].join(" · ")));
+  const agentLine = ["agent " + (session.agentState || "-")];
+  if (session.mainState) agentLine.push("main " + session.mainState);
+  if (session.agentType) agentLine.push(session.agentType);
+  if (session.toolName) agentLine.push("도구 " + session.toolName);
+  if (session.kind === "terminal") agentLine.push("터미널 판정");
+  node.appendChild(el("div", "meta", agentLine.join(" · ")));
+  node.appendChild(el("div", "row reason", session.reason));
+  if (session.summary && session.summary.text) {
+    node.appendChild(el("div", "row summary", session.summary.text));
+  }
+  const progress = el("div", "progress");
+  if (session.progress && session.progress.percent !== null) {
+    const bar = el("div", "bar");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuenow", String(session.progress.percent));
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", "100");
+    const fill = el("span");
+    fill.style.width = Math.min(100, Math.max(0, session.progress.percent)) + "%";
+    bar.appendChild(fill);
+    progress.appendChild(bar);
+    progress.appendChild(el("div", "meta", session.progress.percent + "% — " + session.progress.basis));
+  } else {
+    progress.appendChild(el("div", "meta", "진행률 산정 불가" +
+      (session.progress && session.progress.basis !== "산정 불가" ? " — " + session.progress.basis : "")));
+  }
+  node.appendChild(progress);
+  const footer = [];
+  const output = el("span", "ago");
+  output.dataset.ms = session.lastOutputAt === null ? "" : String(session.lastOutputAt);
+  output.textContent = "마지막 출력 " + ago(session.lastOutputAt);
+  const meta = el("div", "row meta");
+  meta.appendChild(output);
+  if (prText(session.pr)) footer.push(prText(session.pr));
+  if (session.comment) footer.push("코멘트: " + session.comment);
+  if (footer.length) meta.appendChild(el("span", null, " · " + footer.join(" · ")));
+  node.appendChild(meta);
+  return node;
+}
+
+function renderWorktrees(listId, titleId, label, items) {
+  const list = document.getElementById(listId);
+  list.replaceChildren();
+  document.getElementById(titleId).textContent = label + " (" + items.length + ")";
+  for (const item of items) {
+    const parts = [item.repo || "-", item.branch, item.displayName];
+    if (item.liveTerminalCount) parts.push("터미널 " + item.liveTerminalCount + "개");
+    if (prText(item.pr)) parts.push(prText(item.pr));
+    list.appendChild(el("li", null, parts.filter(Boolean).join(" · ")));
+  }
+}
+
+function renderBanner() {
+  const banner = document.getElementById("banner");
+  const messages = [];
+  if (fetchError) messages.push("대시보드 서버 연결 실패: " + fetchError);
+  if (latest && latest.error) {
+    const since = latest.lastSuccessAt ? " — 직전 성공 " + clock(latest.lastSuccessAt) +
+      " (" + ago(latest.lastSuccessAt) + ") 데이터 표시 중" : " — 성공한 수집 없음";
+    messages.push("Orca 수집 실패: " + latest.error + since);
+  }
+  banner.textContent = messages.join("\n");
+  banner.classList.toggle("show", messages.length > 0);
+}
+
+function render() {
+  if (!latest) return;
+  document.getElementById("kpi-total").textContent = latest.kpi.total;
+  document.getElementById("kpi-running").textContent = latest.kpi.running;
+  document.getElementById("kpi-waiting").textContent = latest.kpi.waitingUser;
+  document.getElementById("kpi-blocked").textContent = latest.kpi.blockedOrStale;
+  const cards = document.getElementById("cards");
+  cards.replaceChildren(...latest.sessions.map(card));
+  if (!latest.sessions.length) cards.appendChild(el("div", "empty", "표시할 에이전트 세션이 없습니다"));
+  renderWorktrees("shell-only-list", "shell-only-title", "셸만 열린 worktree", latest.shellOnly || []);
+  renderWorktrees("no-terminal-list", "no-terminal-title", "터미널 없는 worktree", latest.noTerminal || []);
+  renderBanner();
+  tick();
+}
+
+function tick() {
+  if (latest) {
+    const base = latest.lastSuccessAt || latest.generatedAt;
+    document.getElementById("updated").textContent = "갱신 " + ago(base);
+  }
+  for (const node of document.querySelectorAll(".ago")) {
+    node.textContent = "마지막 출력 " + (node.dataset.ms ? ago(Number(node.dataset.ms)) : "-");
+  }
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/api/snapshot", {cache: "no-store"});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    latest = await response.json();
+    fetchError = null;
+    if (latest.interval) pollMs = Math.max(500, latest.interval * 1000);
+    render();
+  } catch (error) {
+    fetchError = String(error && error.message ? error.message : error);
+    renderBanner();
+  } finally {
+    setTimeout(poll, pollMs);
+  }
+}
+
+setInterval(tick, 1000);
+poll();
+</script>
+</body>
+</html>
+"""
 
 
 if __name__ == "__main__":
