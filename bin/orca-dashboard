@@ -43,6 +43,8 @@ REPLY_END_PREFIXES = ("✻", "❯", "※", "─")
 SPINNER_RE = re.compile(r"^[✢✳✶✻✽·*]\s+\S+…")
 STEP_HEADING_RE = re.compile(r"^## Step (\d+)", re.M)
 STEP_MENTION_RE = re.compile(r"Step\s*(\d+)")
+STEP_FORECAST_RE = re.compile(r"다음|이후|next", re.I)
+STEP_FORECAST_LOOKBACK = 12
 PIPELINE_NAME_RE = re.compile(r"private-[a-z][a-z-]*")
 COMMENT_PROGRESS_RE = re.compile(r"진행\s*(\d{1,3})\s*%")
 COMPLETION_RE = re.compile(r"머지했|merged=true|완료했습니다|모두 끝났습니다")
@@ -55,6 +57,7 @@ REQUEST_RE = re.compile(
     r"|승인해\s?주세요|확인해\s?주세요|\?\s*$"
 )
 SHELLS_RUNNING_RE = re.compile(r"(\d+) shells? still running")
+MARKDOWN_LEAD_CHARS = "#-*> \t"
 KNOWN_AGENT_STATES = ("working", "done", "idle", None)
 
 
@@ -136,17 +139,27 @@ def is_tail_working(tail_lines: list[str]) -> bool:
     return False
 
 
-def _first_line(text: str | None) -> str | None:
+def _is_markup_only(line: str) -> bool:
+    """코드 펜스·마크다운 표 행/구분선·가로줄처럼 내용 없는 줄."""
+    return line.startswith(("```", "|")) or set(line) <= {"─"}
+
+
+def _first_meaningful_line(text: str | None) -> str | None:
+    """마크다운 장식을 걷어낸 첫 의미 있는 줄 (표시용 요약)."""
     if not text:
         return None
     for line in text.splitlines():
-        if line.strip():
-            return line.strip()[:SUMMARY_MAX_CHARS]
+        stripped = line.strip()
+        if not stripped or _is_markup_only(stripped):
+            continue
+        cleaned = stripped.lstrip(MARKDOWN_LEAD_CHARS).replace("**", "").strip()
+        if cleaned:
+            return cleaned[:SUMMARY_MAX_CHARS]
     return None
 
 
 def summarize(tail_lines: list[str], last_message: str | None) -> dict:
-    """신선한 recap → 마지막 메시지 첫 줄 → 낡은 recap 순으로 요약 선택."""
+    """신선한 recap → 마지막 메시지 첫 의미 있는 줄 → 낡은 recap 순으로 요약 선택."""
     recap = extract_recap(tail_lines)
     if recap is not None:
         recap_at = _recap_index(tail_lines)
@@ -155,7 +168,7 @@ def summarize(tail_lines: list[str], last_message: str | None) -> dict:
         )
         if not reply_after_recap:
             return {"text": recap, "source": "recap"}
-    message = _first_line(last_message)
+    message = _first_meaningful_line(last_message)
     if message is not None:
         return {"text": message, "source": "lastMessage"}
     if recap is not None:
@@ -195,11 +208,21 @@ def _round_half_up_percent(index: int, total: int) -> int:
     return (2 * index * 100 + total) // (2 * total)
 
 
+def _is_step_forecast(text: str, start: int) -> bool:
+    """`다음은 Step 8` 처럼 앞으로 할 단계를 예고하는 언급인지."""
+    preceding = text[max(0, start - STEP_FORECAST_LOOKBACK):start]
+    return STEP_FORECAST_RE.search(preceding) is not None
+
+
 def _latest_step(texts: list[str]) -> int | None:
     for text in _texts_newest_first(texts):
-        mentions = STEP_MENTION_RE.findall(text)
-        if mentions:
-            return int(mentions[-1])
+        current = [
+            int(match.group(1))
+            for match in STEP_MENTION_RE.finditer(text)
+            if not _is_step_forecast(text, match.start())
+        ]
+        if current:
+            return current[-1]
     return None
 
 
@@ -289,11 +312,17 @@ def classify_status(
     tail_lines: list[str],
     last_output_at: int | None,
     now_ms: int,
+    tail_error: str | None = None,
 ) -> dict:
-    """세션 상태 판정 — blocked > waiting_user > stale > running > background > idle 근거 순."""
+    """세션 상태 판정 — blocked > waiting_user > stale > running > background > idle 근거 순.
+
+    tail_error 가 있으면 화면 근거가 없으므로 waiting 계열 state 외에는 stale 로 둔다.
+    """
     request = _request_sentence(last_message)
     if agent_state not in KNOWN_AGENT_STATES:
         return _status("waiting_user", request or f"에이전트 상태: {agent_state}")
+    if tail_error is not None:
+        return _status("stale", f"화면 읽기 실패 — 상태 판정 불가: {tail_error}")
 
     silent_ms = _silent_ms(last_output_at, now_ms)
     is_silent = silent_ms is not None and silent_ms >= STALE_AFTER_MS
@@ -346,6 +375,7 @@ def _session(
     worktree: dict,
     terminal: dict | None,
     tail: list[str],
+    tail_error: str | None,
     agent_type: str | None,
     agent_state: str | None,
     main_state: str | None,
@@ -357,10 +387,11 @@ def _session(
     pipelines: dict[str, list[int]],
 ) -> dict:
     summary = summarize(tail, last_message)
+    recap = extract_recap(tail)
     progress = estimate_progress(
         comment=worktree.get("comment"),
         agent_state=agent_state,
-        texts=[prompt_text, last_message, summary["text"]],
+        texts=[prompt_text, last_message] + ([recap] if recap else []),
         pipelines=pipelines,
     )
     status = classify_status(
@@ -370,6 +401,7 @@ def _session(
         tail_lines=tail,
         last_output_at=last_output_at,
         now_ms=now_ms,
+        tail_error=tail_error,
     )
     return {
         "id": session_id,
@@ -396,8 +428,9 @@ def _session(
     }
 
 
-def _agent_session(agent, worktree, terminal, tails, now_ms, pipelines) -> dict:
-    tail = tails.get(terminal["handle"], []) if terminal else []
+def _agent_session(agent, worktree, terminal, tails, tail_errors, now_ms, pipelines) -> dict:
+    handle = terminal["handle"] if terminal else None
+    tail = tails.get(handle, [])
     terminal_output_at = terminal.get("lastOutputAt") if terminal else None
     return _session(
         session_id=agent.get("paneKey"),
@@ -406,6 +439,7 @@ def _agent_session(agent, worktree, terminal, tails, now_ms, pipelines) -> dict:
         worktree=worktree,
         terminal=terminal,
         tail=tail,
+        tail_error=tail_errors.get(handle),
         agent_type=agent.get("agentType"),
         agent_state=agent.get("state"),
         main_state=(agent.get("mainAgent") or {}).get("state"),
@@ -418,7 +452,7 @@ def _agent_session(agent, worktree, terminal, tails, now_ms, pipelines) -> dict:
     )
 
 
-def _terminal_session(terminal, worktree, tails, now_ms, pipelines) -> dict:
+def _terminal_session(terminal, worktree, tails, tail_errors, now_ms, pipelines) -> dict:
     tail = tails.get(terminal["handle"], [])
     return _session(
         session_id=terminal["handle"],
@@ -427,6 +461,7 @@ def _terminal_session(terminal, worktree, tails, now_ms, pipelines) -> dict:
         worktree=worktree,
         terminal=terminal,
         tail=tail,
+        tail_error=tail_errors.get(terminal["handle"]),
         agent_type=None,
         agent_state="working" if is_tail_working(tail) else "done",
         main_state=None,
@@ -490,8 +525,13 @@ def build_snapshot(
     *,
     now_ms: int,
     pipelines: dict[str, list[int]],
+    tail_errors: dict[str, str] | None = None,
 ) -> dict:
-    """Orca worktree·terminal 원본을 세션 단위 스냅샷으로 조립."""
+    """Orca worktree·terminal 원본을 세션 단위 스냅샷으로 조립.
+
+    tail_errors = terminal read 에 실패한 handle → 오류 메시지 (세션 stale + warnings).
+    """
+    tail_errors = tail_errors or {}
     active = [worktree for worktree in worktrees if not worktree.get("isArchived")]
     terminals_by_pane = {_pane_key(terminal): terminal for terminal in terminals}
     joined_handles: set[str] = set()
@@ -503,7 +543,7 @@ def build_snapshot(
             if terminal:
                 joined_handles.add(terminal["handle"])
             sessions_by_worktree[worktree.get("worktreeId")].append(
-                _agent_session(agent, worktree, terminal, tails, now_ms, pipelines)
+                _agent_session(agent, worktree, terminal, tails, tail_errors, now_ms, pipelines)
             )
 
     worktrees_by_id = {worktree.get("worktreeId"): worktree for worktree in active}
@@ -513,7 +553,7 @@ def build_snapshot(
             continue
         if _is_agent_title(terminal.get("title")):
             sessions_by_worktree[worktree.get("worktreeId")].append(
-                _terminal_session(terminal, worktree, tails, now_ms, pipelines)
+                _terminal_session(terminal, worktree, tails, tail_errors, now_ms, pipelines)
             )
 
     sessions = sorted(
@@ -524,6 +564,7 @@ def build_snapshot(
     return {
         "generatedAt": now_ms,
         "error": None,
+        "warnings": [f"terminal read 실패 {handle}: {message}" for handle, message in tail_errors.items()],
         "kpi": _kpi(sessions),
         "sessions": sessions,
         "shellOnly": [_worktree_entry(w) for w, live in zip(sessionless, has_terminal) if live],
@@ -535,6 +576,7 @@ def error_snapshot(message: str, now_ms: int) -> dict:
     return {
         "generatedAt": now_ms,
         "error": message,
+        "warnings": [],
         "kpi": {"total": 0, "running": 0, "waitingUser": 0, "blockedOrStale": 0},
         "sessions": [],
         "shellOnly": [],
@@ -560,6 +602,8 @@ def run_orca(command: list[str], args: list[str], timeout: float = 15) -> dict:
         raise OrcaError(f"Orca CLI 실행 파일 없음: {command[0] if command else '(빈 명령)'}") from None
     except subprocess.TimeoutExpired:
         raise OrcaError(f"orca {label} 타임아웃 ({timeout}초)") from None
+    except (OSError, ValueError) as error:
+        raise OrcaError(f"orca {label} 실행 실패 ({type(error).__name__}): {error}") from None
     if process.returncode != 0:
         detail = (process.stderr or process.stdout or "").strip()[-300:]
         raise OrcaError(f"orca {label} 실패 (exit {process.returncode}): {detail}")
@@ -570,7 +614,10 @@ def run_orca(command: list[str], args: list[str], timeout: float = 15) -> dict:
     if not isinstance(payload, dict) or not payload.get("ok"):
         detail = payload.get("error") if isinstance(payload, dict) else payload
         raise OrcaError(f"orca {label} ok=false: {detail}")
-    return payload.get("result") or {}
+    result = payload.get("result") or {}
+    if not isinstance(result, dict):
+        raise OrcaError(f"orca {label} result 형식 오류: {type(result).__name__}")
+    return result
 
 
 def load_pipelines(skills_dir: str) -> dict[str, list[int]]:
@@ -594,15 +641,22 @@ def collect(command: list[str], skills_dir: str, now_ms: int) -> dict:
     worktrees = run_orca(command, ["worktree", "ps"]).get("worktrees") or []
     terminals = run_orca(command, ["terminal", "list"]).get("terminals") or []
     tails: dict[str, list[str]] = {}
+    tail_errors: dict[str, str] = {}
     for handle in agent_terminal_handles(worktrees, terminals):
         try:
             result = run_orca(command, ["terminal", "read", "--terminal", handle, "--limit", str(TAIL_LIMIT)])
-            tail = (result.get("terminal") or {}).get("tail") or []
-            tails[handle] = [str(line) for line in tail] if isinstance(tail, list) else str(tail).splitlines()
-        except OrcaError:
-            tails[handle] = []
+        except OrcaError as error:
+            tail_errors[handle] = str(error)
+            continue
+        tail = (result.get("terminal") or {}).get("tail") or []
+        tails[handle] = [str(line) for line in tail] if isinstance(tail, list) else str(tail).splitlines()
     return build_snapshot(
-        worktrees, terminals, tails, now_ms=now_ms, pipelines=load_pipelines(skills_dir)
+        worktrees,
+        terminals,
+        tails,
+        now_ms=now_ms,
+        pipelines=load_pipelines(skills_dir),
+        tail_errors=tail_errors,
     )
 
 
@@ -623,12 +677,13 @@ class SnapshotStore:
         self._last_success_at: int | None = None
 
     def refresh(self, command: list[str]) -> None:
+        """수집 1회. 어떤 예외든 error 로 노출하고 직전 성공 스냅샷을 유지한다."""
         now_ms = now_millis()
         try:
             snapshot = collect(command, SKILLS_DIR, now_ms)
-        except OrcaError as error:
+        except Exception as error:  # noqa: BLE001 — 수집 스레드는 어떤 실패로도 죽지 않는다
             with self._lock:
-                self._snapshot = {**self._snapshot, "error": str(error)}
+                self._snapshot = {**self._snapshot, "error": f"{type(error).__name__}: {error}"}
             return
         with self._lock:
             self._snapshot = snapshot
@@ -930,6 +985,7 @@ function renderBanner() {
       " (" + ago(latest.lastSuccessAt) + ") 데이터 표시 중" : " — 성공한 수집 없음";
     messages.push("Orca 수집 실패: " + latest.error + since);
   }
+  for (const warning of (latest && latest.warnings) || []) messages.push("경고: " + warning);
   banner.textContent = messages.join("\n");
   banner.classList.toggle("show", messages.length > 0);
 }
