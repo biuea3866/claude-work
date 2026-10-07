@@ -1702,6 +1702,141 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard broken transcript ") as 
         str(valid_transcript),
     )
 
+with tempfile.TemporaryDirectory(prefix="orca dashboard assistant fallback ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    fallback_transcript = transcript_directory / "assistant-match.jsonl"
+    fallback_transcript.write_text(
+        transcript_record(
+            "user", "2026-10-07T09:00:00.000Z", "prompt 와 다른 사용자 요청"
+        )
+        + "\n"
+        + transcript_record(
+            "assistant",
+            "2026-10-07T09:00:01.000Z",
+            [{"type": "text", "text": "마지막 assistant 응답으로 찾습니다"}],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    expect_equal(
+        "prompt 불일치 시 마지막 assistant 텍스트와 last_message 일치 파일 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            "덮어쓴 prompt",
+            "마지막 assistant 응답으로 찾습니다",
+        ),
+        str(fallback_transcript),
+    )
+    expect_equal(
+        "prompt None 이어도 마지막 assistant 텍스트와 last_message 일치 파일 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            None,
+            "마지막 assistant 응답으로 찾습니다",
+        ),
+        str(fallback_transcript),
+    )
+    expect_equal(
+        "prompt 와 last_message 가 모두 불일치하면 transcript 없음",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "불일치 prompt", "불일치 assistant 응답"
+        ),
+        None,
+    )
+    expect_equal(
+        "prompt 와 last_message 가 모두 None 이면 transcript 없음",
+        lambda: dashboard.find_transcript(str(transcript_directory), None, None),
+        None,
+    )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard prompt priority ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    prompt_match = transcript_directory / "older-prompt-match.jsonl"
+    assistant_match = transcript_directory / "newer-assistant-match.jsonl"
+    prompt_match.write_text(
+        transcript_record("user", "2026-10-07T09:00:00.000Z", "원래 사용자 요청")
+        + "\n"
+        + transcript_record(
+            "assistant",
+            "2026-10-07T09:00:01.000Z",
+            [{"type": "text", "text": "다른 assistant 응답"}],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assistant_match.write_text(
+        transcript_record("user", "2026-10-07T09:00:02.000Z", "다른 사용자 요청")
+        + "\n"
+        + transcript_record(
+            "assistant",
+            "2026-10-07T09:00:03.000Z",
+            [{"type": "text", "text": "같은 마지막 assistant 응답"}],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.utime(prompt_match, (100, 100))
+    os.utime(assistant_match, (200, 200))
+    expect_equal(
+        "더 최신 last_message 일치 파일보다 prompt 일치 파일 우선",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            "원래 사용자 요청",
+            "같은 마지막 assistant 응답",
+        ),
+        str(prompt_match),
+    )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard last assistant only ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    previous_only = transcript_directory / "previous-assistant-match.jsonl"
+    previous_only.write_text(
+        transcript_record("user", "2026-10-07T09:00:00.000Z", "다른 사용자 요청")
+        + "\n"
+        + transcript_record(
+            "assistant",
+            "2026-10-07T09:00:01.000Z",
+            [{"type": "text", "text": "이전 assistant 응답만 일치"}],
+        )
+        + "\n"
+        + transcript_record(
+            "assistant",
+            "2026-10-07T09:00:02.000Z",
+            [{"type": "text", "text": "실제 마지막 assistant 응답"}],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    expect_equal(
+        "이전 assistant 텍스트만 일치하면 transcript 없음",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "불일치 prompt", "이전 assistant 응답만 일치"
+        ),
+        None,
+    )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard continuation transcript ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    continued_transcript = transcript_directory / "continued.jsonl"
+    continued_transcript.write_text(
+        transcript_record("user", "2026-10-07T09:00:00.000Z", "압축 전 실제 마지막 요청")
+        + "\n"
+        + transcript_record(
+            "user",
+            "2026-10-07T09:00:01.000Z",
+            "This session is being continued from a previous conversation that ran out of context.",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    expect_equal(
+        "continuation 요약이 마지막이어도 그 이전 실제 사용자 요청으로 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "압축 전 실제 마지막 요청"
+        ),
+        str(continued_transcript),
+    )
+
 
 from datetime import datetime
 
@@ -1987,6 +2122,28 @@ def parsed_transcript():
 
 
 print("parse_transcript")
+expect_equal(
+    "prompts 는 continuation 압축 요약을 사용자 요청에서 제외",
+    lambda: dashboard.parse_transcript(
+        [
+            transcript_record(
+                "user", "2026-10-07T09:00:00.000Z", "압축 전 실제 요청"
+            ),
+            transcript_record(
+                "user",
+                "2026-10-07T09:00:01.000Z",
+                "This session is being continued from a previous conversation that ran out of context.",
+            ),
+            transcript_record(
+                "user", "2026-10-07T09:00:02.000Z", "압축 후 실제 요청"
+            ),
+        ]
+    )["prompts"],
+    [
+        {"at": utc_ms("2026-10-07T09:00:00.000Z"), "text": "압축 전 실제 요청"},
+        {"at": utc_ms("2026-10-07T09:00:02.000Z"), "text": "압축 후 실제 요청"},
+    ],
+)
 expect_equal(
     "prompt 는 task-notification·tool_result 전용 user 줄을 제외",
     lambda: parsed_transcript()["prompts"],
