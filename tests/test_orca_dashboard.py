@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -157,6 +158,31 @@ def terminal(handle, worktree_id, tab_id, leaf_id, **overrides):
     }
     value.update(overrides)
     return value
+
+
+def snapshot_progress(last_message, tail_lines, state="done"):
+    progress_worktree = worktree(
+        "wt-progress",
+        agents=[
+            agent(
+                "tab-progress:leaf",
+                state=state,
+                prompt="/private-roadmap",
+                lastAssistantMessage=last_message,
+            )
+        ],
+        liveTerminalCount=1,
+    )
+    progress_terminal = terminal(
+        "term-progress", "wt-progress", "tab-progress", "leaf"
+    )
+    return dashboard.build_snapshot(
+        [progress_worktree],
+        [progress_terminal],
+        {"term-progress": tail_lines},
+        now_ms=NOW_MS,
+        pipelines=PIPELINES,
+    )["sessions"][0]["progress"]
 
 
 print("상수")
@@ -342,6 +368,22 @@ expect_equal(
         ]
     )["percent"],
     44,
+)
+expect_equal(
+    "Step 뒤에 다음 단계 표현이 있어도 현재 Step 만 채택",
+    lambda: progress_result(
+        texts=[
+            "/private-roadmap 현재 Step 4 진행 중입니다. Step 8은 다음 단계입니다."
+        ]
+    )["percent"],
+    44,
+)
+expect_equal(
+    "예고 문장에만 Step 이 있으면 산정 불가",
+    lambda: progress_result(
+        texts=["/private-roadmap Step 8 은 이후 진행"]
+    ),
+    {"percent": None, "basis": "산정 불가"},
 )
 expect_equal(
     "헤딩에 없는 Step 12 는 산정 불가",
@@ -706,6 +748,36 @@ expect_equal(
     )["sessions"][0]["progress"],
     {"percent": 100, "basis": "완료 보고"},
 )
+expect_equal(
+    "build_snapshot 은 낡은 Step 4 recap 보다 최신 완료 보고를 채택",
+    lambda: snapshot_progress(
+        "검증 결과입니다.\n모든 작업을 완료했습니다.",
+        ["※ recap: Step 4 진행 중", "⏺ 모든 작업을 완료했습니다."],
+    ),
+    {"percent": 100, "basis": "완료 보고"},
+)
+expect_equal(
+    "build_snapshot 은 낡은 Step 4 recap 보다 최신 Step 6을 채택",
+    lambda: snapshot_progress(
+        "/private-roadmap Step 6 진행 중",
+        ["※ recap: Step 4 진행 중", "⏺ Step 6 진행 중"],
+    ),
+    {
+        "percent": 67,
+        "basis": "/private-roadmap Step 6 (7/9단계 진행 중)",
+    },
+)
+expect_equal(
+    "build_snapshot 은 신선한 Step 6 recap 을 이전 Step 4 메시지보다 우선",
+    lambda: snapshot_progress(
+        "/private-roadmap Step 4 진행 중",
+        ["※ recap: Step 6 진행 중"],
+    ),
+    {
+        "percent": 67,
+        "basis": "/private-roadmap Step 6 (7/9단계 진행 중)",
+    },
+)
 
 tail_error_worktree = worktree(
     "wt-tail-error",
@@ -751,6 +823,38 @@ expect_equal(
     ["python3", "/tmp/orca fixture.py", "--mode", "test"],
 )
 expect_equal("ORCA_CLI_COMMAND 미설정은 orca", lambda: dashboard.orca_command({}), ["orca"])
+
+print("load_pipelines 읽기 실패")
+with tempfile.TemporaryDirectory(prefix="orca dashboard skill read ") as temporary_directory:
+    skills_directory = Path(temporary_directory) / "skills"
+    readable_skill = skills_directory / "private-readable" / "SKILL.md"
+    unreadable_skill = skills_directory / "private-unreadable" / "SKILL.md"
+    readable_skill.parent.mkdir(parents=True)
+    unreadable_skill.parent.mkdir(parents=True)
+    readable_skill.write_text("# Skill\n\n## Step 0\n\n## Step 1\n", encoding="utf-8")
+    unreadable_skill.write_text("# Secret\n\n## Step 9\n", encoding="utf-8")
+    unreadable_skill.chmod(0o000)
+    pipeline_warnings = []
+    try:
+        loaded_pipelines = dashboard.load_pipelines(
+            str(skills_directory), pipeline_warnings
+        )
+        load_pipelines_error = ""
+    except Exception as error:
+        loaded_pipelines = None
+        load_pipelines_error = f"{type(error).__name__}: {error}"
+    finally:
+        unreadable_skill.chmod(0o600)
+    check(
+        "권한 없는 SKILL.md 는 건너뛰고 나머지 pipeline 과 warning 반환",
+        loaded_pipelines == {"private-readable": [0, 1]}
+        and len(pipeline_warnings) == 1
+        and pipeline_warnings[0].startswith(
+            f"SKILL.md 읽기 실패 {unreadable_skill}: "
+        ),
+        load_pipelines_error
+        or f"pipelines={loaded_pipelines!r}, warnings={pipeline_warnings!r}",
+    )
 
 print("run_orca 실행 실패")
 with tempfile.TemporaryDirectory(prefix="orca dashboard permission ") as temporary_directory:
@@ -911,6 +1015,71 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard ") as temporary_director
             snapshot_process.stderr[-500:],
         ),
     )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard skill CLI ") as temporary_directory:
+    temporary_root = Path(temporary_directory) / "harness"
+    copied_dashboard = temporary_root / "bin" / "orca-dashboard"
+    copied_dashboard.parent.mkdir(parents=True)
+    shutil.copy2(DASHBOARD_PATH, copied_dashboard)
+    readable_skill = temporary_root / "skills" / "private-readable" / "SKILL.md"
+    unreadable_skill = temporary_root / "skills" / "private-unreadable" / "SKILL.md"
+    readable_skill.parent.mkdir(parents=True)
+    unreadable_skill.parent.mkdir(parents=True)
+    readable_skill.write_text("# Skill\n\n## Step 0\n", encoding="utf-8")
+    unreadable_skill.write_text("# Unreadable\n\n## Step 1\n", encoding="utf-8")
+    unreadable_skill.chmod(0o000)
+    skill_failure_env = fixture_environment(temporary_directory)
+    try:
+        skill_failure_process = subprocess.run(
+            [sys.executable, str(copied_dashboard), "snapshot"],
+            cwd=temporary_root,
+            env=skill_failure_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        unreadable_skill.chmod(0o600)
+    skill_failure_payload = parse_stdout_json(skill_failure_process)
+    check(
+        "snapshot 은 SKILL.md 읽기 실패에도 성공 JSON 과 warning 출력",
+        skill_failure_process.returncode == 0
+        and isinstance(skill_failure_payload, dict)
+        and skill_failure_payload.get("error") is None
+        and len(skill_failure_payload.get("warnings", [])) == 1
+        and skill_failure_payload["warnings"][0].startswith(
+            f"SKILL.md 읽기 실패 {unreadable_skill}: "
+        ),
+        "exit={} stdout={!r} stderr={!r}".format(
+            skill_failure_process.returncode,
+            skill_failure_process.stdout[-500:],
+            skill_failure_process.stderr[-500:],
+        ),
+    )
+
+unexpected_env = os.environ.copy()
+unexpected_env["ORCA_CLI_COMMAND"] = '"unterminated'
+unexpected_process = subprocess.run(
+    [sys.executable, str(DASHBOARD_PATH), "snapshot"],
+    cwd=ROOT,
+    env=unexpected_env,
+    capture_output=True,
+    text=True,
+    timeout=10,
+)
+unexpected_payload = parse_stdout_json(unexpected_process)
+check(
+    "snapshot 은 예상 못 한 예외도 exit 1 실패 JSON 으로 변환",
+    unexpected_process.returncode == 1
+    and isinstance(unexpected_payload, dict)
+    and str(unexpected_payload.get("error", "")).startswith("ValueError: ")
+    and unexpected_payload.get("warnings") == [],
+    "exit={} stdout={!r} stderr={!r}".format(
+        unexpected_process.returncode,
+        unexpected_process.stdout[-500:],
+        unexpected_process.stderr[-500:],
+    ),
+)
 
 failure_env = os.environ.copy()
 failure_env["ORCA_CLI_COMMAND"] = "false"
