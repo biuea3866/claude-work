@@ -82,10 +82,10 @@ roles: [research.market, research.cross, research.verify, idea.generate, idea.cr
 과제마다 아래를 수행한다. 과제끼리는 독립이므로 **동시 실행**한다 (codex 는 background Bash 여러 개).
 
 1. **role `prd.author`** — `05-tasks.md` 의 해당 과제 + `04-roadmap-summary.md` 전달. 프롬프트에 다음을 명시한다:
-   - 구조는 `rules/private-prd-template.md` 그대로. Background 에 과제 ID·근거 로드맵 항목을, Benchmarking 에 `02-verified.md` 의 확인 사실을 쓴다.
-   - User Scenarios 는 유즈케이스 단위로, Problem Definition 에 AS-IS, Functional Requirements 에 TO-BE 세부 정책을 쓴다.
-   - Milestones 는 로드맵 단계(분기) 단위까지만 — 날짜 일정은 설계 이후에 정한다.
-   - `## Roadmap Alignment` 섹션을 Milestones 뒤에 추가해 다른 과제·도메인·회사 로드맵과의 의존·충돌 가능성을 적는다.
+   - 구조·문체는 `rules/private-prd-template.md` 그대로 (개조식 명사형). Overview 의 Epic/과제 ID·근거 문서에 과제 ID·근거 로드맵 항목을, 인사이트의 참조 제품 표에 `02-verified.md` 의 확인 사실을 쓴다.
+   - 사용자 문제 → 해결 방안 표의 사용자 문제 열에 As-Is, 세부 정책(User Story + AC · As-Is/To-Be · 상세 정책)에 To-Be 세부 정책을 쓴다.
+   - Target release 는 로드맵 단계(분기) 단위까지만 — 날짜 일정은 설계 이후에 정한다.
+   - `# Roadmap Alignment` 섹션을 Open Questions 앞에 추가해 다른 과제·도메인·회사 로드맵과의 의존·충돌 가능성을 적는다.
 2. **role `prd.review`** — PRD 경로 + `04-roadmap-summary.md` 전달. NEEDS_REVISION 이면 지적을 writer 에게 넘겨 보완 (최대 2회).
 
 ## Step 7 — 과제 간 충돌 검증

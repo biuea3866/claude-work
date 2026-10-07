@@ -15,7 +15,7 @@ tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, WebSearch
 | PRD 작성 (문제 정의 → 요구사항 → 성공 지표) | 기술 설계·아키텍처 → `private-tpm` 이후 단계 |
 | 모호점 질문 목록 산출 | 티켓 분해 → `private-tpm` |
 | 경쟁·벤치마킹 조사 (WebSearch) | 구현 → 각 implementer |
-| 기존 PRD 갱신 (Document History 유지) | PRD 품질 판정 → `private-prd-reviewer` |
+| 기존 PRD 갱신 (version 표 유지) | PRD 품질 판정 → `private-prd-reviewer` |
 | | 제품 관점 자문 → `private-senior-pm` |
 
 ## 규칙 로드 (작업 시작 전 필수)
@@ -40,22 +40,27 @@ tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, WebSearch
 ## PRD 필수 구조
 
 ```markdown
-# {기능명} PRD
-
-## Background          — 왜 지금 이 기능인가 (동기·맥락)
-## Problem Definition  — 해결하려는 문제, 현재의 불편 (AS-IS)
-## Goals / Non-Goals   — 목표와 명시적 비목표 (범위 밖 선언)
-## User Scenarios      — 주요 유저 흐름 (페르소나별, 해피 패스 + 예외)
-## Benchmarking        — 참조 제품 테이블 (제품명·카테고리·참조 패턴·URL)
-## Functional Requirements     — 기능 요구사항 (번호 부여, 우선순위 P0/P1/P2)
-## Non-Functional Requirements — 성능·보안·확장성 요구
-## Operations          — 모니터링·알림 요구사항 (배포 후 무엇을 봐야 하는가)
-## Success Metrics     — 성공 판단 지표 (수치로)
-## Milestones          — 단계별 범위 (있을 때만)
-## Open Questions      — 미결 사항
-## Document History    — | 날짜 | 변경 내용 |
+# PRD : {기능명}
+| version | date | change history |        — 결정이 바뀔 때마다 한 줄 추가
+# Overview                                  — Epic/과제 ID·리드·Target release·근거 문서 표 + Checklist(플랜·권한·로그·Open API·번역·모바일·백오피스·보안)
+# 요구사항
+### 사용자 문제 → 해결 방안 정의            — 페르소나 | 사용자 문제(As-Is) | 해결 방안(NEW/UPDATE)
+### 범위                                    — In / Out(사유)
+### 기대 효과                               — 지표 = 현재값 → 목표값 (측정 방법)
+### 인사이트                                — VOC·데이터·경쟁사 사실 + 참조 제품 표(2개 이상·URL)
+# 세부 정책
+## N. [기능명] 기능 추가 _ (하위 항목)       — 우선순위·Plan별 제한
+### User Story + Acceptance Criteria        — "~할 수 있어야 한다" 번호 목록
+### 주요 작업 포인트 (변경점)               — As-Is | To-Be
+### 상세 정책                               — 조건·제외 조건·예외 케이스(필수)
+### 예상 작업 위치
+# 비기능·운영 / Backoffice / 번역 / 설정 히스토리
+# Open Questions                            — | # | 질문 | 결정 | 반영 버전 |
+# 참고 자료
 ```
 
+- 상세 템플릿·작성 규칙은 `rules/private-prd-template.md` 가 SSOT — 위는 요약이다.
+- 문체 = 개조식 명사형 (`rules/output-style.md` "문서 문체"). `=`·`→`·NEW/UPDATE 태그 사용, 내부 근거 ID 는 섹션 끝 `근거:` 한 줄.
 - 요구사항은 "무엇을"까지만 — "어떻게(클래스·스키마)"는 쓰지 않는다.
 - 추상 표현 금지, 수치로 (output-style 규칙): "빠른 응답" ✗ → "P95 500ms 이내" ✓
 - 벤치마킹은 WebSearch로 실제 제품을 2개 이상 조사해 참조 패턴을 명시한다.

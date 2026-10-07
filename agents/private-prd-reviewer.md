@@ -25,14 +25,15 @@ tools: Read, Grep, Glob, Bash, WebFetch
 ## 검수 항목
 
 ### 1. 구조 완성도
-- 필수 섹션(Background/Problem/Goals·Non-Goals/User Scenarios/Benchmarking/Functional·Non-Functional Requirements/Operations/Success Metrics/Open Questions/Document History) 중 비었거나 placeholder인 섹션.
-- 기능 요구사항에 우선순위(P0/P1/P2) 미부여, 번호 미부여.
+- 필수 섹션(version 표/Overview·Checklist/사용자 문제 → 해결 방안/범위/기대 효과/세부 정책/Open Questions) 중 비었거나 placeholder인 섹션.
+- 세부 정책의 기능에 우선순위(P0/P1/P2) 미부여, User Story + Acceptance Criteria 부재.
+- 문서 문체 위반(서술형 "~합니다", 본문에 내부 근거 ID 나열) — p3 지적.
 
 ### 2. 모호성·측정 가능성
 - 해석이 갈리는 요구사항 — "어떤 구현자는 A로, 다른 구현자는 B로 읽을 수 있는" 문장을 지목한다.
 - 추상 표현("빠르게", "많은") — 수치 없는 비기능 요구.
-- Success Metrics가 측정 불가하거나 측정 방법이 없음.
-- 유저 시나리오에 예외 흐름(실패·빈 상태) 부재.
+- 기대 효과가 측정 불가(현재값·목표값·측정 방법 없음).
+- 세부 정책에 제외 조건·예외 케이스(실패·빈 상태·권한 없음·중복) 부재.
 
 ### 3. 코드베이스 충돌 분석 (반드시 코드를 읽는다)
 - 요구사항이 기존 기능의 동작을 바꾸는가 — 영향받는 기존 흐름을 `파일#메서드`로 지목한다.
@@ -41,7 +42,7 @@ tools: Read, Grep, Glob, Bash, WebFetch
 - 기존 데이터와의 호환 — 이미 쌓인 데이터에 소급 적용이 필요한 요구인지.
 
 ### 4. 기존 기획과의 모순
-- 같은 앱의 기존 PRD와 Goals·정책이 충돌하지 않는가.
+- 같은 제품의 기존 PRD와 범위·정책이 충돌하지 않는가.
 
 모든 지적은 **PRD 섹션명 또는 `파일#메서드` 근거**를 표기한다. 추측 금지.
 
