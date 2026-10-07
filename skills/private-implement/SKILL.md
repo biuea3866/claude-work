@@ -32,7 +32,7 @@ roles: [analyze.context, analyze.cross, test.red, implement.be, implement.fe, im
 
 | 파일 | 작성 | 단계 |
 |---|---|---|
-| `analysis-A.md` / `analysis-B.md` | analyze.context / analyze.cross | 1 |
+| `analysis-A.md` / `analysis-B.md` | 메인 세션 (analyze.context / analyze.cross 의 최종 메시지 원문 저장) | 1 |
 | `context.md` | 메인 세션 (대조·확정) | 1 |
 | `red.md` | test.red | 2 |
 | `review-<n>.md` | review.code | 5 |
@@ -48,7 +48,8 @@ roles: [analyze.context, analyze.cross, test.red, implement.be, implement.fe, im
 
 ## Step 1 — 컨텍스트 분석 (A ‖ B 독립)
 
-1. **role `analyze.context`** 와 **role `analyze.cross`** 를 **한 메시지에서 동시에** 실행한다. 입력은 동일하게 티켓·요구사항 + worktree 경로 + 산출 경로(`analysis-A.md` / `analysis-B.md`)뿐이다. 서로의 산출물 경로를 알려주지 않는다.
+1. **role `analyze.context`** 와 **role `analyze.cross`** 를 **한 메시지에서 동시에** 실행한다. 입력은 동일하게 티켓·요구사항 + worktree 경로뿐이다. 서로의 산출물을 알려주지 않는다.
+   - 분석가는 보고서를 **최종 메시지 원문으로 반환**하고 파일을 쓰지 않는다. 메인 세션이 그 원문을 가공 없이 `analysis-A.md` / `analysis-B.md` 로 저장한다 (codex 는 `-o` 산출, claude 는 Agent 반환값). claude 서브에이전트의 run 디렉토리 Write 가 정책으로 거부돼 매번 실패 왕복이 생겼기 때문이다 (`skills/learned/20261007-subagent-report-write-blocked.md`).
 2. 메인 세션이 두 분석을 대조해 차이를 3유형으로 분류한다.
 
 | 유형 | 예 | 처리 |
