@@ -92,14 +92,17 @@ def progress_result(**overrides):
 
 def worktree(worktree_id, **overrides):
     value = {
-        "id": worktree_id,
+        "worktreeId": worktree_id,
+        "repoId": "repo-acme-dashboard",
         "repo": "acme/dashboard",
         "branch": "refs/heads/feat/live",
         "displayName": "Dashboard",
         "path": f"/tmp/{worktree_id}",
+        "isArchived": False,
         "agents": [],
         "liveTerminalCount": 0,
-        "pr": None,
+        "lastOutputAt": NOW_MS - 1_000,
+        "linkedPR": None,
         "comment": None,
         "workspaceStatus": "clean",
     }
@@ -107,28 +110,37 @@ def worktree(worktree_id, **overrides):
     return value
 
 
-def agent(tab_id, leaf_id, **overrides):
+def agent(pane_key, **overrides):
     value = {
-        "tabId": tab_id,
-        "leafId": leaf_id,
+        "paneKey": pane_key,
+        "parentPaneKey": None,
         "state": "done",
         "mainAgent": {"state": "done"},
         "agentType": "codex",
         "prompt": None,
         "lastAssistantMessage": None,
+        "toolName": "Claude Code",
+        "toolInput": None,
+        "interrupted": False,
+        "stateStartedAt": NOW_MS - 20_000,
         "updatedAt": NOW_MS - 10_000,
     }
     value.update(overrides)
     return value
 
 
-def terminal(handle, pane_key, **overrides):
+def terminal(handle, worktree_id, tab_id, leaf_id, **overrides):
     value = {
         "handle": handle,
-        "paneKey": pane_key,
+        "worktreeId": worktree_id,
+        "worktreePath": f"/tmp/{worktree_id}",
+        "branch": "refs/heads/feat/live",
+        "tabId": tab_id,
+        "leafId": leaf_id,
         "title": "✳ Dashboard agent",
+        "connected": True,
         "lastOutputAt": NOW_MS - 1_000,
-        "toolName": "Claude Code",
+        "preview": "",
     }
     value.update(overrides)
     return value
@@ -427,8 +439,7 @@ joined_worktree = worktree(
     displayName="Fallback name",
     agents=[
         agent(
-            "tab-a",
-            "leaf-a",
+            "tab-a:leaf-a",
             state="working",
             mainAgent={"state": "working"},
             prompt="/private-roadmap Step 4",
@@ -436,12 +447,17 @@ joined_worktree = worktree(
         )
     ],
     liveTerminalCount=1,
-    pr={"number": 42, "state": "OPEN"},
+    linkedPR={"number": 42, "state": "OPEN"},
     comment="진행 70%",
     workspaceStatus="modified",
 )
 joined_terminal = terminal(
-    "term-a", "tab-a:leaf-a", title="✳ Joined agent", lastOutputAt=NOW_MS - 2_000
+    "term-a",
+    "wt-joined",
+    "tab-a",
+    "leaf-a",
+    title="✳ Joined agent",
+    lastOutputAt=NOW_MS - 2_000,
 )
 expect_equal(
     "paneKey 조인·이름·branch·PR·공개 필드 매핑",
@@ -495,7 +511,7 @@ fallback_worktree = worktree(
     "wt-fallback",
     displayName="Fallback name",
     branch="",
-    agents=[agent("tab-b", "leaf-b", updatedAt=NOW_MS - 3_000)],
+    agents=[agent("tab-b:leaf-b", updatedAt=NOW_MS - 3_000)],
 )
 expect_equal(
     "터미널 조인 실패 agent 는 displayName·updatedAt·detached 사용",
@@ -516,15 +532,18 @@ expect_equal(
 terminal_worktree = worktree("wt-terminal", liveTerminalCount=2)
 unjoined_agent_terminal = terminal(
     "term-glyph",
-    "tab-x:leaf-x",
+    "wt-terminal",
+    "tab-x",
+    "leaf-x",
     title="✳ GRT-9608 하위 테스트 티켓 작성",
-    worktreeId="wt-terminal",
 )
 plain_shell_terminal = terminal(
     "term-shell",
-    "tab-y:leaf-y",
+    "wt-terminal",
+    "pty:5150a2fa@@a68bac86",
+    "shell",
     title=None,
-    worktreeId="wt-terminal",
+    lastOutputAt=None,
 )
 expect_equal(
     "agents 미등록 글리프 터미널은 terminal 세션, 일반 셸은 제외",
@@ -571,22 +590,22 @@ expect_equal(
 )
 
 status_agents = [
-    agent("tab-blocked", "leaf", state="done"),
-    agent("tab-waiting", "leaf", state="permission"),
-    agent("tab-stale", "leaf", state="working", mainAgent={"state": "working"}),
-    agent("tab-running", "leaf", state="working", mainAgent={"state": "working"}),
-    agent("tab-background", "leaf", state="working", mainAgent={"state": "done"}),
-    agent("tab-idle-old", "leaf", state="done"),
-    agent("tab-idle-new", "leaf", state="done"),
+    agent("tab-blocked:leaf", state="done"),
+    agent("tab-waiting:leaf", state="permission"),
+    agent("tab-stale:leaf", state="working", mainAgent={"state": "working"}),
+    agent("tab-running:leaf", state="working", mainAgent={"state": "working"}),
+    agent("tab-background:leaf", state="working", mainAgent={"state": "done"}),
+    agent("tab-idle-old:leaf", state="done"),
+    agent("tab-idle-new:leaf", state="done"),
 ]
 status_terminals = [
-    terminal("h-blocked", "tab-blocked:leaf", lastOutputAt=NOW_MS - 1_000),
-    terminal("h-waiting", "tab-waiting:leaf", lastOutputAt=NOW_MS - 2_000),
-    terminal("h-stale", "tab-stale:leaf", lastOutputAt=NOW_MS - 900_000),
-    terminal("h-running", "tab-running:leaf", lastOutputAt=NOW_MS - 3_000),
-    terminal("h-background", "tab-background:leaf", lastOutputAt=NOW_MS - 4_000),
-    terminal("h-idle-old", "tab-idle-old:leaf", lastOutputAt=NOW_MS - 20_000),
-    terminal("h-idle-new", "tab-idle-new:leaf", lastOutputAt=NOW_MS - 10_000),
+    terminal("h-blocked", "wt-status", "tab-blocked", "leaf", lastOutputAt=NOW_MS - 1_000),
+    terminal("h-waiting", "wt-status", "tab-waiting", "leaf", lastOutputAt=NOW_MS - 2_000),
+    terminal("h-stale", "wt-status", "tab-stale", "leaf", lastOutputAt=NOW_MS - 900_000),
+    terminal("h-running", "wt-status", "tab-running", "leaf", lastOutputAt=NOW_MS - 3_000),
+    terminal("h-background", "wt-status", "tab-background", "leaf", lastOutputAt=NOW_MS - 4_000),
+    terminal("h-idle-old", "wt-status", "tab-idle-old", "leaf", lastOutputAt=NOW_MS - 20_000),
+    terminal("h-idle-new", "wt-status", "tab-idle-new", "leaf", lastOutputAt=NOW_MS - 10_000),
 ]
 status_tails = {terminal_value["handle"]: [] for terminal_value in status_terminals}
 status_tails["h-blocked"] = ["BUILD FAILED"]
@@ -641,11 +660,58 @@ if arguments[-1:] == ["--json"]:
     arguments = arguments[:-1]
 
 if arguments == ["worktree", "ps"]:
-    result = {"worktrees": []}
+    result = {
+        "worktrees": [{
+            "worktreeId": "wt-stub",
+            "repoId": "repo-stub",
+            "repo": "acme/dashboard",
+            "displayName": "Stub dashboard",
+            "path": "/tmp/wt-stub",
+            "branch": "refs/heads/feat/live",
+            "isArchived": False,
+            "workspaceStatus": "clean",
+            "comment": "",
+            "liveTerminalCount": 1,
+            "lastOutputAt": 1999000,
+            "linkedPR": None,
+            "agents": [{
+                "paneKey": "tab-stub:leaf-stub",
+                "parentPaneKey": None,
+                "state": "done",
+                "agentType": "codex",
+                "prompt": "snapshot fixture",
+                "lastAssistantMessage": "fixture ready",
+                "toolName": "Read",
+                "toolInput": "tests/test_orca_dashboard.py",
+                "interrupted": False,
+                "mainAgent": {"state": "done", "stateStartedAt": 1980000},
+                "stateStartedAt": 1985000,
+                "updatedAt": 1999000
+            }]
+        }]
+    }
 elif arguments == ["terminal", "list"]:
-    result = {"terminals": []}
+    result = {
+        "terminals": [{
+            "handle": "term-stub",
+            "worktreeId": "wt-stub",
+            "worktreePath": "/tmp/wt-stub",
+            "branch": "refs/heads/feat/live",
+            "tabId": "tab-stub",
+            "leafId": "leaf-stub",
+            "title": "✳ Stub dashboard",
+            "connected": True,
+            "lastOutputAt": 1999000,
+            "preview": "fixture ready"
+        }]
+    }
 elif arguments[:2] == ["terminal", "read"]:
-    result = {"terminal": {"tail": []}}
+    result = {
+        "terminal": {
+            "handle": "term-stub",
+            "tail": ["⏺ fixture ready"]
+        }
+    }
 else:
     print(json.dumps({"ok": False, "error": "unexpected arguments: " + repr(arguments)}))
     raise SystemExit(1)
@@ -698,7 +764,9 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard ") as temporary_director
         "스텁 Orca snapshot 은 exit 0 + 유효 snapshot JSON",
         snapshot_process.returncode == 0
         and isinstance(snapshot_payload, dict)
-        and snapshot_payload.get("sessions") == []
+        and len(snapshot_payload.get("sessions", [])) == 1
+        and snapshot_payload["sessions"][0].get("id") == "tab-stub:leaf-stub"
+        and snapshot_payload["sessions"][0].get("terminalHandle") == "term-stub"
         and snapshot_payload.get("error") is None,
         "exit={} stdout={!r} stderr={!r}".format(
             snapshot_process.returncode,
