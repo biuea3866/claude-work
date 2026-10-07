@@ -731,8 +731,19 @@ def _user_request_text(record: dict) -> str | None:
     return text
 
 
-def _match_key(text: str | None) -> str:
-    return " ".join((text or "").split())[:TRANSCRIPT_MATCH_CHARS]
+def _normalized(text: str | None) -> str:
+    return " ".join((text or "").split())
+
+
+def _texts_match(expected: str, actual: str | None) -> bool:
+    """정규화 후 전체 일치. 한쪽이 잘린 경우(짧은 쪽 60자 이상)만 접두사 일치 허용."""
+    actual = _normalized(actual)
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+    shorter, longer = sorted((expected, actual), key=len)
+    return len(shorter) >= TRANSCRIPT_MATCH_CHARS and longer.startswith(shorter)
 
 
 def _first_line(text, limit: int) -> str | None:
@@ -897,7 +908,7 @@ def build_detail(session: dict, transcript: dict | None, *, now_ms: int) -> dict
             "main": {
                 "name": session.get("name"),
                 "agentType": session.get("agentType"),
-                "state": session.get("agentState"),
+                "state": session.get("mainState") or session.get("agentState"),
                 "toolName": session.get("toolName"),
             },
             "children": sorted(tasks, key=_child_sort_key),
@@ -1100,8 +1111,8 @@ def find_transcript(
     Orca prompt 는 같은 pane 의 하위 codex 입력으로 덮일 수 있어 ② 를 대체 키로 쓴다.
     ①② 가 모두 없고 sole_session(그 경로의 세션이 하나뿐)이면 ③ 읽기 가능한 최신 파일.
     """
-    prompt_key = _match_key(prompt)
-    reply_key = _match_key(last_message)
+    prompt_key = _normalized(prompt)
+    reply_key = _normalized(last_message)
     if not prompt_key and not reply_key and not sole_session:
         return None
     try:
@@ -1124,9 +1135,9 @@ def find_transcript(
             request, reply = _MATCH_TEXTS.get(path, stat)
         except (OSError, UnicodeDecodeError):
             continue
-        if prompt_key and _match_key(request) == prompt_key:
+        if _texts_match(prompt_key, request):
             return path
-        if reply_match is None and reply_key and _match_key(reply) == reply_key:
+        if reply_match is None and _texts_match(reply_key, reply):
             reply_match = path
         if newest_readable is None:
             newest_readable = path
@@ -1619,6 +1630,7 @@ let detail = null;
 let detailKey = "";
 let detailError = null;
 let detailMissing = null;
+let detailRequest = 0;
 let openedFromList = false;
 
 function el(tag, className, text) {
@@ -2040,6 +2052,7 @@ function onRoute() {
   document.getElementById("list-view").hidden = Boolean(id);
   document.getElementById("detail-view").hidden = !id;
   detail = null; detailKey = ""; detailMissing = null; detailError = null;
+  detailRequest += 1;
   if (id) {
     renderDetail();
     window.scrollTo(0, 0);
@@ -2059,11 +2072,15 @@ function goBack() {
 }
 
 async function loadDetail(id) {
+  // 응답 수신·본문 파싱 뒤에도 이 요청이 최신이고 라우트가 그대로일 때만 반영 (늦게 온 이전 응답은 버림)
+  const request = ++detailRequest;
+  const stale = () => request !== detailRequest || routeId() !== id;
   try {
     const response = await fetch("/api/session?id=" + encodeURIComponent(id), {cache: "no-store"});
-    if (routeId() !== id) return;
+    if (stale()) return;
     if (response.status === 404) {
       const payload = await response.json().catch(() => ({}));
+      if (stale()) return;
       detail = null; detailKey = ""; detailError = null;
       detailMissing = "세션을 찾을 수 없습니다 — 종료됐거나 목록에서 사라졌을 수 있습니다" + (payload.error ? " (" + payload.error + ")" : "");
       renderDetail();
@@ -2071,6 +2088,7 @@ async function loadDetail(id) {
     }
     if (!response.ok) throw new Error("HTTP " + response.status);
     const text = await response.text();
+    if (stale()) return;
     detailError = null; detailMissing = null;
     if (text !== detailKey) {
       detailKey = text;
@@ -2078,6 +2096,7 @@ async function loadDetail(id) {
       renderDetail();
     }
   } catch (error) {
+    if (stale()) return;
     detailError = String(error && error.message ? error.message : error);
   }
   tick();
