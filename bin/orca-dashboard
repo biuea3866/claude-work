@@ -44,7 +44,7 @@ SPINNER_RE = re.compile(r"^[✢✳✶✻✽·*]\s+\S+…")
 STEP_HEADING_RE = re.compile(r"^## Step (\d+)", re.M)
 STEP_MENTION_RE = re.compile(r"Step\s*(\d+)")
 STEP_FORECAST_RE = re.compile(r"다음|이후|next", re.I)
-STEP_FORECAST_LOOKBACK = 12
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n")
 PIPELINE_NAME_RE = re.compile(r"private-[a-z][a-z-]*")
 COMMENT_PROGRESS_RE = re.compile(r"진행\s*(\d{1,3})\s*%")
 COMPLETION_RE = re.compile(r"머지했|merged=true|완료했습니다|모두 끝났습니다")
@@ -93,6 +93,14 @@ def _starts_with_any(line: str, prefixes: tuple[str, ...]) -> bool:
 
 def _recap_index(tail_lines: list[str]) -> int | None:
     return _last_index(tail_lines, lambda line: line.lstrip().startswith(RECAP_PREFIX))
+
+
+def is_recap_fresh(tail_lines: list[str]) -> bool:
+    """마지막 recap 이후 `⏺` 응답 줄이 없으면 신선 (recap 이 가장 최근 상태)."""
+    recap_at = _recap_index(tail_lines)
+    if recap_at is None:
+        return False
+    return not any(line.strip().startswith("⏺") for line in tail_lines[recap_at + 1:])
 
 
 def extract_recap(tail_lines: list[str]) -> str | None:
@@ -161,13 +169,8 @@ def _first_meaningful_line(text: str | None) -> str | None:
 def summarize(tail_lines: list[str], last_message: str | None) -> dict:
     """신선한 recap → 마지막 메시지 첫 의미 있는 줄 → 낡은 recap 순으로 요약 선택."""
     recap = extract_recap(tail_lines)
-    if recap is not None:
-        recap_at = _recap_index(tail_lines)
-        reply_after_recap = any(
-            line.strip().startswith("⏺") for line in tail_lines[recap_at + 1:]
-        )
-        if not reply_after_recap:
-            return {"text": recap, "source": "recap"}
+    if recap is not None and is_recap_fresh(tail_lines):
+        return {"text": recap, "source": "recap"}
     message = _first_meaningful_line(last_message)
     if message is not None:
         return {"text": message, "source": "lastMessage"}
@@ -208,19 +211,19 @@ def _round_half_up_percent(index: int, total: int) -> int:
     return (2 * index * 100 + total) // (2 * total)
 
 
-def _is_step_forecast(text: str, start: int) -> bool:
-    """`다음은 Step 8` 처럼 앞으로 할 단계를 예고하는 언급인지."""
-    preceding = text[max(0, start - STEP_FORECAST_LOOKBACK):start]
-    return STEP_FORECAST_RE.search(preceding) is not None
+def _current_steps(text: str) -> list[int]:
+    """예고 문장(`다음`·`이후`·`next` 포함)을 뺀 문장들의 `Step N` 번호 (등장 순)."""
+    return [
+        int(match.group(1))
+        for sentence in SENTENCE_SPLIT_RE.split(text)
+        if not STEP_FORECAST_RE.search(sentence)
+        for match in STEP_MENTION_RE.finditer(sentence)
+    ]
 
 
 def _latest_step(texts: list[str]) -> int | None:
     for text in _texts_newest_first(texts):
-        current = [
-            int(match.group(1))
-            for match in STEP_MENTION_RE.finditer(text)
-            if not _is_step_forecast(text, match.start())
-        ]
+        current = _current_steps(text)
         if current:
             return current[-1]
     return None
@@ -367,6 +370,18 @@ def _is_agent_title(title: str | None) -> bool:
     return bool(title) and title[0] in AGENT_TITLE_GLYPHS
 
 
+def _texts_by_freshness(
+    prompt_text: str | None, last_message: str | None, tail: list[str]
+) -> list[str | None]:
+    """판정 texts 를 오래된 것 → 최신 순으로. 신선한 recap 은 마지막 메시지보다 최신."""
+    recap = extract_recap(tail)
+    if recap is None:
+        return [prompt_text, last_message]
+    if is_recap_fresh(tail):
+        return [prompt_text, last_message, recap]
+    return [prompt_text, recap, last_message]
+
+
 def _session(
     *,
     session_id: str,
@@ -387,11 +402,10 @@ def _session(
     pipelines: dict[str, list[int]],
 ) -> dict:
     summary = summarize(tail, last_message)
-    recap = extract_recap(tail)
     progress = estimate_progress(
         comment=worktree.get("comment"),
         agent_state=agent_state,
-        texts=[prompt_text, last_message] + ([recap] if recap else []),
+        texts=_texts_by_freshness(prompt_text, last_message, tail),
         pipelines=pipelines,
     )
     status = classify_status(
@@ -572,11 +586,11 @@ def build_snapshot(
     }
 
 
-def error_snapshot(message: str, now_ms: int) -> dict:
+def error_snapshot(message: str, now_ms: int, warnings: list[str] | None = None) -> dict:
     return {
         "generatedAt": now_ms,
         "error": message,
-        "warnings": [],
+        "warnings": list(warnings or []),
         "kpi": {"total": 0, "running": 0, "waitingUser": 0, "blockedOrStale": 0},
         "sessions": [],
         "shellOnly": [],
@@ -620,8 +634,11 @@ def run_orca(command: list[str], args: list[str], timeout: float = 15) -> dict:
     return result
 
 
-def load_pipelines(skills_dir: str) -> dict[str, list[int]]:
-    """skills/*/SKILL.md 중 `## Step` 헤딩이 있는 스킬 → 단계 번호 목록."""
+def load_pipelines(skills_dir: str, warnings: list[str] | None = None) -> dict[str, list[int]]:
+    """skills/*/SKILL.md 중 `## Step` 헤딩이 있는 스킬 → 단계 번호 목록.
+
+    읽기 실패한 SKILL.md 는 건너뛰고 warnings 에 남긴다 (정의 1개 실패가 전체를 막지 않음).
+    """
     pipelines: dict[str, list[int]] = {}
     if not os.path.isdir(skills_dir):
         return pipelines
@@ -629,15 +646,25 @@ def load_pipelines(skills_dir: str) -> dict[str, list[int]]:
         path = os.path.join(skills_dir, name, "SKILL.md")
         if not os.path.isfile(path):
             continue
-        with open(path, encoding="utf-8") as handle:
-            steps = parse_step_headings(handle.read())
+        try:
+            with open(path, encoding="utf-8") as handle:
+                steps = parse_step_headings(handle.read())
+        except (OSError, UnicodeDecodeError) as error:
+            if warnings is not None:
+                warnings.append(f"SKILL.md 읽기 실패 {path}: {error}")
+            continue
         if steps:
             pipelines[name] = steps
     return pipelines
 
 
-def collect(command: list[str], skills_dir: str, now_ms: int) -> dict:
-    """worktree ps → terminal list → 에이전트 터미널 tail 읽기 → build_snapshot."""
+def collect(command: list[str], skills_dir: str, now_ms: int, warnings: list[str] | None = None) -> dict:
+    """스킬 정의 → worktree ps → terminal list → 에이전트 터미널 tail 읽기 → build_snapshot.
+
+    warnings = 수집 중 경고를 누적할 list (실패 시 호출자가 실패 JSON 에 싣는다).
+    """
+    warnings = [] if warnings is None else warnings
+    pipelines = load_pipelines(skills_dir, warnings)
     worktrees = run_orca(command, ["worktree", "ps"]).get("worktrees") or []
     terminals = run_orca(command, ["terminal", "list"]).get("terminals") or []
     tails: dict[str, list[str]] = {}
@@ -650,14 +677,15 @@ def collect(command: list[str], skills_dir: str, now_ms: int) -> dict:
             continue
         tail = (result.get("terminal") or {}).get("tail") or []
         tails[handle] = [str(line) for line in tail] if isinstance(tail, list) else str(tail).splitlines()
-    return build_snapshot(
+    snapshot = build_snapshot(
         worktrees,
         terminals,
         tails,
         now_ms=now_ms,
-        pipelines=load_pipelines(skills_dir),
+        pipelines=pipelines,
         tail_errors=tail_errors,
     )
+    return {**snapshot, "warnings": [*warnings, *snapshot["warnings"]]}
 
 
 def now_millis() -> int:
@@ -738,10 +766,15 @@ def cmd_snapshot(args: list[str]) -> int:
     if args:
         return usage()
     now_ms = now_millis()
+    warnings: list[str] = []
     try:
-        snapshot = collect(orca_command(os.environ), SKILLS_DIR, now_ms)
+        snapshot = collect(orca_command(os.environ), SKILLS_DIR, now_ms, warnings)
     except OrcaError as error:
-        print(json.dumps(error_snapshot(str(error), now_ms), ensure_ascii=False))
+        print(json.dumps(error_snapshot(str(error), now_ms, warnings), ensure_ascii=False))
+        return 1
+    except Exception as error:  # noqa: BLE001 — snapshot 은 어떤 실패도 실패 JSON 으로 응답한다
+        message = f"{type(error).__name__}: {error}"
+        print(json.dumps(error_snapshot(message, now_ms, warnings), ensure_ascii=False))
         return 1
     print(json.dumps(snapshot, ensure_ascii=False))
     return 0
