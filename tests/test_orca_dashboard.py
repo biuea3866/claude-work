@@ -4610,8 +4610,9 @@ const snapshotPayload = {
   kpi: {total: 3, running: 0, waitingUser: 0, blockedOrStale: 0},
   sessions, shellOnly: [], noTerminal: [],
 };
+let detailRevision = 0;
 function detailPayload(id) {
-  const selected = sessions.find((item) => item.id === id);
+  const selected = {...sessions.find((item) => item.id === id), idleSeconds: detailRevision++};
   const workItems = [
     {id: "work-completed", title: "완료한 이전 작업", startedAt: 100, endedAt: 110,
       requestCount: 1, pipeline: "private-implement", runId: null, stepPath: [1, 2], finalStep: 2,
@@ -4727,6 +4728,14 @@ NODE_UI_SCENARIOS = r"""
     && !ancestor(latestTitle, (node) => node.tagName === "details");
   const pastCollapsed = ["완료한 이전 작업", "설명으로 끝난 작업", "중단된 작업"]
     .every((title) => Boolean(ancestor(exactTitle(title), (node) => node.tagName === "details")));
+  const completedDetails = ancestor(exactTitle("완료한 이전 작업"), (node) => node.tagName === "details");
+  completedDetails.open = true;
+  await loadDetail("A");
+  await settle();
+  const refreshedDetailNodes = descendants(document.getElementById("detail-body"));
+  const refreshedCompletedTitle = refreshedDetailNodes.find((node) => node.textContent === "완료한 이전 작업");
+  const refreshedCompletedDetails = ancestor(refreshedCompletedTitle, (node) => node.tagName === "details");
+  const pastOpenPreserved = Boolean(refreshedCompletedDetails) && refreshedCompletedDetails.open === true;
   const historyLabels = ["✔", "▶", "◦", "✕", "완료", "진행 중", "응답 종료", "중단",
     "private-implement", "private-roadmap", "산정 불가", "Step 1", "Step 7", "서브에이전트", "셸"]
     .every((label) => text("detail-body").includes(label))
@@ -4774,7 +4783,7 @@ NODE_UI_SCENARIOS = r"""
   const retryRecovery = cFailures === 1 && errorShown && !text("banner").includes("fixture network failure") && text("detail-body").includes("세션 C");
 
   process.stdout.write(JSON.stringify({cardClick, enterKey, backToList, responseRace, retryRecovery,
-    cardSummary, historyRows, latestExpanded, pastCollapsed, historyLabels, trendSegments, trendInsufficient}));
+    cardSummary, historyRows, latestExpanded, pastCollapsed, pastOpenPreserved, historyLabels, trendSegments, trendInsufficient}));
 })().catch((error) => {
   process.stdout.write(JSON.stringify({harnessError: String(error && error.stack ? error.stack : error)}));
   process.exitCode = 2;
@@ -4840,6 +4849,7 @@ for result_key, test_name in (
     ("historyRows", "작업 히스토리는 workItems 4개 행을 모두 렌더"),
     ("latestExpanded", "최신 작업은 펼친 행과 aria-current=true 로 표시"),
     ("pastCollapsed", "과거 작업 3개는 details 안에 접어서 표시"),
+    ("pastOpenPreserved", "H16 펼친 과거 작업은 상세 폴링 재렌더 후에도 open 유지"),
     ("historyLabels", "작업 행은 결과 4값·pipeline·진행률·Step·도구 수를 표시"),
     ("trendSegments", "진행률 SVG 는 workId·null·dashboard 경계마다 선을 분리"),
     ("trendInsufficient", "유효 진행률 점이 2개 미만이면 추이 기록 부족 표시"),
@@ -5085,6 +5095,479 @@ expect_predicate(
         "runs/private-implement/20200101-outside",
     ],
     "inside heredoc ignored and only outside mkdir splits the work",
+)
+
+
+print("H11 완료 고정")
+
+
+def completed_then_gratitude_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                140,
+                "첫 번째 요청을 완성해 주세요",
+                uuid="completed-before-gratitude",
+            ),
+            assistant_text(141, "요청한 작업을 모두 완료했습니다"),
+            history_record("user", 142, "고마워", uuid="gratitude-is-new-work"),
+            assistant_text(143, "네"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "완료 뒤 고마워는 새 작업이고 이전 작업은 completed 100% 유지",
+    completed_then_gratitude_items,
+    lambda items: len(items) == 2
+    and [item["id"] for item in items]
+    == ["completed-before-gratitude", "gratitude-is-new-work"]
+    and items[0]["result"] == "completed"
+    and items[0]["progress"] == {"percent": 100, "basis": "완료 보고"}
+    and items[1]["result"] == "in_progress",
+    "two work items with the first fixed at completed 100 percent",
+)
+
+
+def completed_then_approval_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                145,
+                "승인 전 작업을 완성해 주세요",
+                uuid="completed-before-approval",
+            ),
+            assistant_text(146, "요청한 작업을 완료했습니다"),
+            history_record("user", 147, "승인", uuid="approval-followup"),
+            assistant_text(148, "네"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "완료 뒤 승인과 응답 네는 같은 작업의 completed 100%를 취소하지 않음",
+    completed_then_approval_items,
+    lambda items: len(items) == 1
+    and items[0]["id"] == "completed-before-approval"
+    and items[0]["requestCount"] == 2
+    and items[0]["result"] == "completed"
+    and items[0]["progress"] == {"percent": 100, "basis": "완료 보고"},
+    "one completed work item with two requests and 100 percent",
+)
+
+
+expect_predicate(
+    "완료된 파이프라인 뒤 긴 요청은 새 작업으로 분할",
+    lambda: dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                150,
+                slash_request("private-implement", "첫 파이프라인 작업"),
+                uuid="completed-pipeline",
+            ),
+            assistant_text(151, "파이프라인 작업을 완료했습니다"),
+            history_record(
+                "user",
+                152,
+                "로그인 오류를 새 작업으로 자세히 고쳐 주세요",
+                uuid="long-after-completed-pipeline",
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 2
+    and items[0]["result"] == "completed"
+    and items[1]["id"] == "long-after-completed-pipeline"
+    and items[1]["pipeline"] is None,
+    "completed pipeline followed by a separate plain work item",
+)
+
+
+print("H12 짧은 후속 표현")
+expect_predicate(
+    "로그인 고쳐줘는 새 작업이고 머지해와 1만 그 작업에 병합",
+    lambda: dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                155,
+                "첫 번째 독립 작업을 처리해 주세요",
+                uuid="before-short-request",
+            ),
+            history_record("user", 156, "로그인 고쳐줘", uuid="login-fix-work"),
+            history_record("user", 157, "머지해", uuid="merge-followup"),
+            history_record("user", 158, "1", uuid="number-followup"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 2
+    and [item["id"] for item in items] == ["before-short-request", "login-fix-work"]
+    and [item["requestCount"] for item in items] == [1, 3],
+    "two work items; only merge and numeric follow-ups join the second",
+)
+
+
+print("H13 명시 중단 우선")
+expect_predicate(
+    "마지막 작업의 interrupt 표식은 in_progress 보다 우선해 interrupted",
+    lambda: dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                160,
+                "마지막 작업을 시작합니다",
+                uuid="last-interrupted-work",
+            ),
+            history_record("user", 161, "[Request interrupted by user for tool use]"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 1 and items[0]["result"] == "interrupted",
+    "one interrupted last work item",
+)
+
+
+expect_predicate(
+    "interrupt 뒤 계속은 같은 파이프라인 작업을 in_progress 로 재개",
+    lambda: dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                163,
+                slash_request("private-implement", "중단 뒤 재개"),
+                uuid="resumed-pipeline",
+            ),
+            assistant_text(164, "현재 Step 3 진행 중입니다."),
+            history_record("user", 165, "[Request interrupted by user for tool use]"),
+            history_record("user", 166, "계속", uuid="resume-followup"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 1
+    and items[0]["id"] == "resumed-pipeline"
+    and items[0]["requestCount"] == 2
+    and items[0]["result"] == "in_progress"
+    and items[0]["progress"]["basis"].endswith("진행 중)"),
+    "one resumed in-progress pipeline work item",
+)
+
+
+expect_predicate(
+    "중단된 파이프라인 뒤 긴 요청은 새 작업으로 분할",
+    lambda: dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                168,
+                slash_request("private-implement", "중단 뒤 새 요청"),
+                uuid="interrupted-before-new-work",
+            ),
+            assistant_text(169, "현재 Step 3 진행 중입니다."),
+            history_record("user", 170, "[Request interrupted by user for tool use]"),
+            history_record(
+                "user",
+                171,
+                "검색 결과 정렬을 별도 작업으로 구현해 주세요",
+                uuid="long-after-interrupt",
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 2
+    and items[0]["result"] == "interrupted"
+    and items[1]["id"] == "long-after-interrupt"
+    and items[1]["result"] == "in_progress",
+    "interrupted pipeline followed by a separate in-progress work item",
+)
+
+
+print("H14 mkdir 대상 run 신호")
+
+
+def work_with_mkdir_candidate(command):
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                175,
+                "mkdir 대상 판정을 검증합니다",
+                uuid="mkdir-target-work",
+            ),
+            tool_use(
+                176,
+                "toolu-mkdir-candidate",
+                "Bash",
+                {"command": command},
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "mkdir output 뒤 cat 의 run 경로는 파이프라인 시작 신호가 아님",
+    lambda: work_with_mkdir_candidate(
+        "mkdir -p output && cat runs/private-roadmap/20261007-old/result.md"
+    ),
+    lambda items: len(items) == 1
+    and items[0]["id"] == "mkdir-target-work"
+    and items[0]["pipeline"] is None
+    and items[0]["runId"] is None,
+    "one plain work item without a run id",
+)
+
+for mkdir_label, mkdir_command, expected_run in (
+    (
+        "$R",
+        "R=runs/private-implement/20261007-x && mkdir -p $R",
+        "runs/private-implement/20261007-x",
+    ),
+    (
+        '"${R}"',
+        'R=runs/private-implement/20261007-x && mkdir -p "${R}"',
+        "runs/private-implement/20261007-x",
+    ),
+    (
+        "직접 경로",
+        "mkdir -p runs/private-implement/20261007-y",
+        "runs/private-implement/20261007-y",
+    ),
+):
+    expect_predicate(
+        f"mkdir {mkdir_label} 대상은 run 디렉토리 시작 신호",
+        lambda command=mkdir_command: work_with_mkdir_candidate(command),
+        lambda items, run_id=expected_run: len(items) == 1
+        and items[0]["pipeline"] == "private-implement"
+        and items[0]["runId"] == run_id,
+        f"one private-implement work item with run id {expected_run}",
+    )
+
+
+print("H15·H17 HistoryStore 압축 경계")
+
+
+def seed_compaction_history(path):
+    with path.open("w", encoding="utf-8") as handle:
+        for index in range(20_001):
+            session_id = "compact-a" if index % 2 == 0 else "compact-b"
+            handle.write(
+                json.dumps(
+                    {
+                        "v": 1,
+                        "at": index,
+                        "sessionId": session_id,
+                        "status": "running",
+                        "percent": index % 101,
+                        "basis": "fixture",
+                        "pipeline": None,
+                        "step": None,
+                    }
+                )
+                + "\n"
+            )
+
+
+def history_store_same_instance_after_compaction():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard compact identity ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        seed_compaction_history(path)
+        store = dashboard.HistoryStore(str(path))
+        store.load()
+        warnings = store.record(
+            {"error": None, "sessions": [history_session("compact-new")]},
+            30_000,
+        )
+        memory = {
+            session_id: store.points(session_id)
+            for session_id in ("compact-a", "compact-b", "compact-new")
+        }
+        reloaded = dashboard.HistoryStore(str(path))
+        load_warnings = reloaded.load()
+        persisted = {
+            session_id: reloaded.points(session_id)
+            for session_id in ("compact-a", "compact-b", "compact-new")
+        }
+        return (
+            warnings,
+            load_warnings,
+            memory == persisted,
+            {session_id: len(points) for session_id, points in memory.items()},
+            {session_id: len(points) for session_id, points in persisted.items()},
+        )
+
+
+expect_predicate(
+    "압축 직후 같은 인스턴스 points 는 재로드 points 와 같고 중복 없음",
+    history_store_same_instance_after_compaction,
+    lambda result: result[0] == []
+    and result[1] == []
+    and result[2]
+    and result[3] == result[4]
+    and result[3]["compact-new"] == 1,
+    "identical in-memory and reloaded points with one compact-new point",
+)
+
+
+def history_store_compaction_failure_recovery():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard compact failure ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        seed_compaction_history(path)
+        store = dashboard.HistoryStore(str(path))
+        store.load()
+        snapshot = {"error": None, "sessions": [history_session("compact-failure")]}
+        original_replace = dashboard.os.replace
+
+        def fail_replace(_source, _target):
+            raise OSError("forced os.replace failure")
+
+        dashboard.os.replace = fail_replace
+        try:
+            first_warnings = store.record(snapshot, 31_000)
+        finally:
+            dashboard.os.replace = original_replace
+        after_failure = store.points("compact-failure")
+        second_warnings = store.record(snapshot, 32_000)
+        final_memory = store.points("compact-failure")
+        reloaded = dashboard.HistoryStore(str(path))
+        load_warnings = reloaded.load()
+        persisted = reloaded.points("compact-failure")
+        return (
+            first_warnings,
+            after_failure,
+            second_warnings,
+            final_memory,
+            load_warnings,
+            persisted,
+        )
+
+
+expect_predicate(
+    "압축 실패 뒤 append 점은 반영되고 다음 record 에서 같은 점을 재기록하지 않음",
+    history_store_compaction_failure_recovery,
+    lambda result: len(result[0]) == 1
+    and result[0][0].startswith("history 기록 실패 ")
+    and len(result[1]) == 1
+    and result[2] == []
+    and result[3] == result[5]
+    and len(result[3]) == 1
+    and result[4] == [],
+    "one retained point after the warning and no duplicate on retry",
+)
+
+
+def concurrent_history_compaction_observation():
+    worker_source = f'''\
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import time
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("orca_dashboard_worker", {str(DASHBOARD_PATH)!r})
+spec = importlib.util.spec_from_loader("orca_dashboard_worker", loader)
+dashboard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(dashboard)
+path, ready_path, go_path, session_id, at = sys.argv[1:]
+store = dashboard.HistoryStore(path)
+warnings = store.load()
+Path(ready_path).write_text("ready", encoding="utf-8")
+deadline = time.monotonic() + 10
+while not Path(go_path).exists() and time.monotonic() < deadline:
+    time.sleep(0.005)
+snapshot = {{"error": None, "sessions": [{{
+    "id": session_id,
+    "name": session_id,
+    "path": "/tmp/concurrent-history",
+    "agentType": "codex",
+    "status": "running",
+    "progress": {{"percent": 50, "basis": "concurrent"}},
+    "checklist": {{"pipeline": None, "steps": []}},
+}}]}}
+warnings.extend(store.record(snapshot, int(at)))
+print(json.dumps(warnings, ensure_ascii=False))
+raise SystemExit(0 if not warnings else 2)
+'''
+    with tempfile.TemporaryDirectory(prefix="orca dashboard concurrent compact ") as temporary_directory:
+        root = Path(temporary_directory)
+        path = root / "history.jsonl"
+        worker_path = root / "worker.py"
+        go_path = root / "go"
+        seed_compaction_history(path)
+        worker_path.write_text(worker_source, encoding="utf-8")
+        processes = []
+        ready_paths = []
+        for index, session_id in enumerate(("concurrent-a", "concurrent-b")):
+            ready_path = root / f"ready-{index}"
+            ready_paths.append(ready_path)
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(worker_path),
+                        str(path),
+                        str(ready_path),
+                        str(go_path),
+                        session_id,
+                        str(40_000 + index),
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        deadline = time.monotonic() + 10
+        while not all(ready_path.exists() for ready_path in ready_paths) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        all_ready = all(ready_path.exists() for ready_path in ready_paths)
+        go_path.write_text("go", encoding="utf-8")
+        outcomes = []
+        for process in processes:
+            try:
+                stdout, stderr = process.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                outcomes.append((-1, stdout, stderr))
+            else:
+                outcomes.append((process.returncode, stdout, stderr))
+        reloaded = dashboard.HistoryStore(str(path))
+        load_warnings = reloaded.load()
+        counts = {
+            session_id: len(reloaded.points(session_id))
+            for session_id in (
+                "compact-a",
+                "compact-b",
+                "concurrent-a",
+                "concurrent-b",
+            )
+        }
+        line_count = len(path.read_text(encoding="utf-8").splitlines())
+        return all_ready, outcomes, load_warnings, counts, line_count
+
+
+expect_predicate(
+    "두 프로세스 동시 record 와 압축 뒤 줄 유실·중복 없음",
+    concurrent_history_compaction_observation,
+    lambda result: result[0]
+    and all(outcome[0] == 0 for outcome in result[1])
+    and result[2] == []
+    and result[3]
+    == {
+        "compact-a": 500,
+        "compact-b": 500,
+        "concurrent-a": 1,
+        "concurrent-b": 1,
+    }
+    and result[4] == 1002,
+    "500/500 seeded points plus one point from each concurrent writer",
 )
 
 
