@@ -83,10 +83,10 @@ for role in ("roadmap.author", "roadmap.split", "prd.author"):
 prd_binding = bindings.get("cross-review", {}).get("prd.author") or {}
 check("prd.author = codex/T1 (과제별 PRD 품질 — terra → sol 상향)",
       prd_binding.get("tier") == "T1", repr(prd_binding))
-codex_rt = roles.get("runtimes", {}).get("codex", {})
-prd_model_alias = (codex_rt.get("tiers", {}).get(prd_binding.get("tier")) or {}).get("model")
+codex_runtime = roles.get("runtimes", {}).get("codex", {})
+prd_model_alias = (codex_runtime.get("tiers", {}).get(prd_binding.get("tier")) or {}).get("model")
 check("prd.author 해석 모델 = gpt-6-sol",
-      (codex_rt.get("models", {}).get(prd_model_alias) or {}).get("id") == "gpt-6-sol",
+      (codex_runtime.get("models", {}).get(prd_model_alias) or {}).get("id") == "gpt-6-sol",
       repr(prd_model_alias))
 check("research.cross 가 research.market 을 verifies",
       "research.market" in (role_specs.get("research.cross") or {}).get("verifies", []))
