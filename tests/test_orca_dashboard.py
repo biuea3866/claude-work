@@ -2547,6 +2547,269 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard detail serve ") as tempo
         "non-empty innerHTML assignment found",
     )
 
+
+print("find_transcript 단일 세션 경로 최종 대체")
+with tempfile.TemporaryDirectory(prefix="orca dashboard sole transcript ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    older_transcript = transcript_directory / "older.jsonl"
+    newer_transcript = transcript_directory / "newer.jsonl"
+    write_transcript(older_transcript, "서로 다른 이전 요청")
+    write_transcript(newer_transcript, "서로 다른 최신 요청")
+    os.utime(older_transcript, (100, 100))
+    os.utime(newer_transcript, (200, 200))
+    expect_equal(
+        "①② 불일치해도 단일 세션 경로면 mtime 최신 transcript 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            "덮어쓴 prompt",
+            "빈 last message",
+            sole_session=True,
+        ),
+        str(newer_transcript),
+    )
+    expect_equal(
+        "①② 불일치하고 단일 세션 경로가 아니면 transcript 없음",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "덮어쓴 prompt", "빈 last message"
+        ),
+        None,
+    )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard sole priority ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    prompt_match = transcript_directory / "older-prompt-match.jsonl"
+    newest_fallback = transcript_directory / "newest-fallback.jsonl"
+    write_transcript(prompt_match, "원래 사용자 요청")
+    write_transcript(newest_fallback, "다른 사용자 요청")
+    os.utime(prompt_match, (100, 100))
+    os.utime(newest_fallback, (200, 200))
+    expect_equal(
+        "더 오래된 ① prompt 일치는 단일 세션 ③ 최신 대체보다 우선",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            "원래 사용자 요청",
+            None,
+            sole_session=True,
+        ),
+        str(prompt_match),
+    )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard sole unreadable ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    next_latest = transcript_directory / "next-latest.jsonl"
+    unreadable_latest = transcript_directory / "unreadable-latest.jsonl"
+    write_transcript(next_latest, "읽을 수 있는 transcript")
+    unreadable_latest.mkdir()
+    os.utime(next_latest, (100, 100))
+    os.utime(unreadable_latest, (200, 200))
+    expect_equal(
+        "단일 세션 ③ 최신 transcript 읽기 실패 시 다음 최신 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), None, None, sole_session=True
+        ),
+        str(next_latest),
+    )
+
+expect_equal(
+    "단일 세션이어도 transcript 디렉토리가 없으면 None",
+    lambda: dashboard.find_transcript(
+        "/definitely/missing/orca-dashboard-sole-transcripts",
+        "불일치 prompt",
+        None,
+        sole_session=True,
+    ),
+    None,
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard sole empty keys ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    older_transcript = transcript_directory / "older.jsonl"
+    newer_transcript = transcript_directory / "newer.jsonl"
+    write_transcript(older_transcript, "이전 요청")
+    write_transcript(newer_transcript, "최신 요청")
+    os.utime(older_transcript, (100, 100))
+    os.utime(newer_transcript, (200, 200))
+    expect_equal(
+        "prompt·last_message 모두 None이어도 단일 세션 경로면 mtime 최신 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), None, None, sole_session=True
+        ),
+        str(newer_transcript),
+    )
+
+
+R24_ORCA_STUB = r'''#!/usr/bin/env python3
+import json
+import os
+import sys
+
+arguments = sys.argv[1:]
+if arguments[-1:] == ["--json"]:
+    arguments = arguments[:-1]
+
+mode = os.environ["R24_STUB_MODE"]
+worktree_path = "/tmp/r24-worktree"
+agent_count = 0 if mode == "unique-terminal" else (2 if mode == "two-agents" else 1)
+agents = []
+terminals = []
+for index in range(agent_count):
+    suffix = str(index + 1)
+    agents.append({
+        "paneKey": "tab-r24-" + suffix + ":leaf-r24-" + suffix,
+        "parentPaneKey": None,
+        "state": "done",
+        "agentType": "codex",
+        "prompt": "transcript 요청과 불일치하는 하위 codex persona " + suffix,
+        "lastAssistantMessage": "",
+        "toolName": "Bash",
+        "toolInput": "python3 worker.py",
+        "interrupted": False,
+        "mainAgent": {"state": "done", "stateStartedAt": 1980000},
+        "stateStartedAt": 1985000,
+        "updatedAt": 1999000 + index
+    })
+    terminals.append({
+        "handle": "term-r24-" + suffix,
+        "worktreeId": "wt-r24",
+        "worktreePath": worktree_path,
+        "branch": "refs/heads/feat/r24",
+        "tabId": "tab-r24-" + suffix,
+        "leafId": "leaf-r24-" + suffix,
+        "title": "✳ R24 agent " + suffix,
+        "connected": True,
+        "lastOutputAt": 1999000 + index,
+        "preview": "fixture ready"
+    })
+
+if mode == "unique-terminal":
+    terminals.append({
+        "handle": "term-r24-terminal",
+        "worktreeId": "wt-r24",
+        "worktreePath": worktree_path,
+        "branch": "refs/heads/feat/r24",
+        "tabId": "tab-r24-terminal",
+        "leafId": "leaf-r24-terminal",
+        "title": "✳ R24 terminal session",
+        "connected": True,
+        "lastOutputAt": 1999000,
+        "preview": "terminal fixture ready"
+    })
+
+if arguments == ["worktree", "ps"]:
+    result = {"worktrees": [{
+        "worktreeId": "wt-r24",
+        "repoId": "repo-r24",
+        "repo": "acme/r24",
+        "displayName": "R24 dashboard",
+        "path": worktree_path,
+        "branch": "refs/heads/feat/r24",
+        "isArchived": False,
+        "workspaceStatus": "clean",
+        "comment": "",
+        "liveTerminalCount": len(terminals),
+        "lastOutputAt": 1999000,
+        "linkedPR": None,
+        "agents": agents
+    }]}
+elif arguments == ["terminal", "list"]:
+    result = {"terminals": terminals}
+elif arguments[:2] == ["terminal", "read"]:
+    handle = arguments[arguments.index("--terminal") + 1]
+    result = {"terminal": {"handle": handle, "tail": ["⏺ fixture ready"]}}
+else:
+    print(json.dumps({"ok": False, "error": "unexpected arguments: " + repr(arguments)}))
+    raise SystemExit(1)
+
+print(json.dumps({"ok": True, "result": result}))
+'''
+
+
+def r24_session_detail(mode, session_id):
+    with tempfile.TemporaryDirectory(prefix="orca dashboard r24 serve ") as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        stub_path = temporary_root / "orca r24 fixture.py"
+        stub_path.write_text(R24_ORCA_STUB, encoding="utf-8")
+        projects_root = temporary_root / "claude-projects"
+        transcript_directory = Path(
+            dashboard.transcript_dir(str(projects_root), "/tmp/r24-worktree")
+        )
+        transcript_directory.mkdir(parents=True)
+        write_transcript(transcript_directory / "available.jsonl", "실제 transcript 요청")
+        environment = os.environ.copy()
+        environment["ORCA_CLI_COMMAND"] = shlex.join([sys.executable, str(stub_path)])
+        environment["CLAUDE_PROJECTS_DIR"] = str(projects_root)
+        environment["R24_STUB_MODE"] = mode
+        port = unused_local_port()
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(DASHBOARD_PATH),
+                "serve",
+                "--port",
+                str(port),
+                "--interval",
+                "0.1",
+            ],
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            expected_count = 2 if mode == "two-agents" else 1
+            ready, ready_error = wait_for_snapshot(
+                process,
+                port,
+                lambda payload: len(payload.get("sessions", [])) == expected_count,
+                timeout=5,
+            )
+            if ready is None:
+                return None, ready_error
+            response = http_response(
+                f"http://127.0.0.1:{port}/api/session?id={session_id}"
+            )
+            try:
+                payload = json.loads(response[2])
+            except json.JSONDecodeError:
+                payload = None
+            return payload, f"status={response[0]}, payload={payload!r}"
+        finally:
+            stop_process(process)
+
+
+print("serve 단일 세션 경로 transcript 최종 대체")
+unique_agent_detail, unique_agent_error = r24_session_detail(
+    "unique-agent", "tab-r24-1:leaf-r24-1"
+)
+check(
+    "path 유일 agent 세션은 prompt 불일치해도 /api/session transcript true",
+    isinstance(unique_agent_detail, dict)
+    and unique_agent_detail.get("transcript") is True,
+    unique_agent_error,
+)
+
+two_agent_detail, two_agent_error = r24_session_detail(
+    "two-agents", "tab-r24-1:leaf-r24-1"
+)
+check(
+    "같은 path 에 세션 2개면 /api/session transcript false",
+    isinstance(two_agent_detail, dict)
+    and two_agent_detail.get("transcript") is False,
+    two_agent_error,
+)
+
+unique_terminal_detail, unique_terminal_error = r24_session_detail(
+    "unique-terminal", "term-r24-terminal"
+)
+check(
+    "path 유일 kind terminal 세션도 /api/session transcript true",
+    isinstance(unique_terminal_detail, dict)
+    and unique_terminal_detail.get("transcript") is True,
+    unique_terminal_error,
+)
+
+
 print()
 if failures:
     print(f"실패 {len(failures)}건")
