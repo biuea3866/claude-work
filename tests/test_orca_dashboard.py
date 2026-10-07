@@ -1169,6 +1169,7 @@ def fixture_environment(directory):
     stub_path.write_text(ORCA_STUB, encoding="utf-8")
     environment = os.environ.copy()
     environment["ORCA_CLI_COMMAND"] = shlex.join([sys.executable, str(stub_path)])
+    environment["ORCA_DASHBOARD_HISTORY_DIR"] = str(Path(directory) / "history")
     return environment
 
 
@@ -1487,6 +1488,9 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard serve permission ") as t
     non_executable.chmod(0o600)
     permission_env = os.environ.copy()
     permission_env["ORCA_CLI_COMMAND"] = shlex.join([str(non_executable)])
+    permission_env["ORCA_DASHBOARD_HISTORY_DIR"] = str(
+        Path(temporary_directory) / "history"
+    )
     permission_port = unused_local_port()
     permission_process = subprocess.Popen(
         [
@@ -2809,7 +2813,13 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard detail serve ") as tempo
         and existing_detail_response[1].get_content_type() == "application/json"
         and isinstance(existing_detail_payload, dict)
         and set(existing_detail_payload)
-        == {"session", "agents", "timeline", "blockers", "transcript"}
+        >= {
+            "session",
+            "agents",
+            "timeline",
+            "blockers",
+            "transcript",
+        }
         and existing_detail_payload.get("transcript") is False,
         detail_ready_error
         if detail_ready is None
@@ -3053,6 +3063,9 @@ def r24_session_detail(mode, session_id):
         environment["ORCA_CLI_COMMAND"] = shlex.join([sys.executable, str(stub_path)])
         environment["CLAUDE_PROJECTS_DIR"] = str(projects_root)
         environment["R24_STUB_MODE"] = mode
+        environment["ORCA_DASHBOARD_HISTORY_DIR"] = str(
+            temporary_root / "history"
+        )
         port = unused_local_port()
         process = subprocess.Popen(
             [
@@ -3190,6 +3203,1256 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard r30 serve ") as temporar
         read_failure_ready_error
         if read_failure_ready is None
         else f"response={read_failure_response!r}, payload={read_failure_payload!r}",
+    )
+
+
+HISTORY_PIPELINES = {
+    "private-implement": list(range(1, 11)),
+    "private-roadmap": list(range(9)),
+}
+HISTORY_STEP_TITLES = {
+    "private-implement": {step: f"구현 {step}" for step in range(1, 11)},
+    "private-roadmap": {step: f"로드맵 {step}" for step in range(9)},
+}
+
+
+def history_timestamp(offset):
+    minute, second = divmod(offset, 60)
+    return f"2026-10-07T10:{minute:02d}:{second:02d}.000Z"
+
+
+def history_record(record_type, offset, content=None, *, uuid=None, attachment=None):
+    value = {"type": record_type, "timestamp": history_timestamp(offset)}
+    if uuid is not None:
+        value["uuid"] = uuid
+    if attachment is not None:
+        value["attachment"] = attachment
+    else:
+        value["message"] = {"content": content}
+    return json.dumps(value, ensure_ascii=False)
+
+
+def queued_command(offset, mode, prompt, *, uuid=None):
+    return history_record(
+        "attachment",
+        offset,
+        uuid=uuid,
+        attachment={
+            "type": "queued_command",
+            "commandMode": mode,
+            "prompt": prompt,
+        },
+    )
+
+
+def assistant_text(offset, text, *, uuid=None):
+    return history_record(
+        "assistant", offset, [{"type": "text", "text": text}], uuid=uuid
+    )
+
+
+def tool_use(offset, tool_id, name, tool_input, *, uuid=None):
+    return history_record(
+        "assistant",
+        offset,
+        [{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}],
+        uuid=uuid,
+    )
+
+
+def slash_request(pipeline, arguments):
+    return (
+        f"<command-message>{pipeline}</command-message>\n"
+        f"<command-name>/{pipeline}</command-name>\n"
+        f"<command-args>{arguments}</command-args>"
+    )
+
+
+print("H1 요청 판정")
+queued_prompt_lines = [
+    queued_command(0, "prompt", "큐에 넣은 실제 요청", uuid="queued-request"),
+]
+expect_equal(
+    "queued_command prompt 는 parse_transcript prompt 로 수집",
+    lambda: dashboard.parse_transcript(queued_prompt_lines)["prompts"],
+    [{"at": utc_ms(history_timestamp(0)), "text": "큐에 넣은 실제 요청"}],
+)
+expect_predicate(
+    "queued_command prompt 는 작업 시작 요청으로 분할",
+    lambda: dashboard.split_work_items(
+        queued_prompt_lines, pipelines=HISTORY_PIPELINES
+    ),
+    lambda items: len(items) == 1
+    and items[0]["id"] == "queued-request"
+    and items[0]["title"] == "큐에 넣은 실제 요청"
+    and items[0]["requestCount"] == 1,
+    "one work item created from the measured attachment shape",
+)
+
+queued_failure_lines = [
+    tool_use(
+        1,
+        "toolu-queued-failure",
+        "Bash",
+        {"command": "false", "description": "큐 알림 셸", "run_in_background": True},
+    ),
+    queued_command(
+        2,
+        "task-notification",
+        notification(
+            "toolu-queued-failure",
+            "failed",
+            'Background command "false" failed (exit code 2)',
+        ),
+    ),
+]
+expect_predicate(
+    "queued_command task-notification 은 백그라운드 셸을 failed 로 종료",
+    lambda: dashboard.parse_transcript(queued_failure_lines)["tasks"],
+    lambda tasks: len(tasks) == 1
+    and tasks[0]["state"] == "failed"
+    and tasks[0]["endedAt"] == utc_ms(history_timestamp(2)),
+    "failed task with attachment notification endedAt",
+)
+
+private_command = slash_request("private-implement", "히스토리 기능을 구현해 주세요")
+excluded_request_lines = [
+    history_record("user", 3, "<command-name>/clear</command-name>"),
+    history_record("user", 4, "<command-name>/model</command-name>"),
+    history_record("user", 5, "<local-command-stdout>ok</local-command-stdout>"),
+    history_record("user", 6, "<local-command-caveat>local only</local-command-caveat>"),
+    history_record("user", 7, "[Request interrupted by user for tool use]"),
+    history_record("user", 8, "Base directory for this skill: /tmp/skill"),
+    history_record(
+        "user",
+        9,
+        "This session is being continued from a previous conversation that ran out of context.",
+    ),
+    history_record("user", 10, private_command, uuid="private-command"),
+    history_record("user", 11, "후속 실제 요청으로 충분히 긴 문장입니다", uuid="actual-request"),
+    history_record("user", 12, "<command-name>/clear</command-name>"),
+]
+expect_equal(
+    "로컬 명령·interrupt·스킬 주입은 제외하고 private- 슬래시는 요청으로 유지",
+    lambda: [
+        prompt["text"]
+        for prompt in dashboard.parse_transcript(excluded_request_lines)["prompts"]
+    ],
+    [
+        "<command-message>private-implement</command-message>",
+        "후속 실제 요청으로 충분히 긴 문장입니다",
+    ],
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard h1 transcript ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    request_path = transcript_directory / "request.jsonl"
+    request_path.write_text("\n".join(excluded_request_lines) + "\n", encoding="utf-8")
+    queued_path = transcript_directory / "queued.jsonl"
+    queued_path.write_text("\n".join(queued_prompt_lines) + "\n", encoding="utf-8")
+    os.utime(request_path, (100, 100))
+    os.utime(queued_path, (200, 200))
+    expect_equal(
+        "find_transcript ①은 제외 요청 뒤의 마지막 실제 요청으로 일치",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "후속 실제 요청으로 충분히 긴 문장입니다"
+        ),
+        str(request_path),
+    )
+    expect_equal(
+        "find_transcript ①은 queued_command prompt 실측 구조로 일치",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "큐에 넣은 실제 요청"
+        ),
+        str(queued_path),
+    )
+
+
+print("H2 작업 분할")
+
+
+def active_pipeline_items():
+    lines = [
+        history_record(
+            "user", 20, "세션 히스토리 기능을 구현해 주세요", uuid="active-start"
+        ),
+        tool_use(
+            21,
+            "toolu-skill-active",
+            "Skill",
+            {"skill": "private-implement", "args": "세션 히스토리"},
+        ),
+        history_record(
+            "user",
+            22,
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu-ask-user",
+                    "content": "Your questions have been answered: 승인",
+                }
+            ],
+        ),
+        history_record(
+            "user", 23, "중간에 이 방식이 안전한지 설명해 주세요", uuid="question"
+        ),
+        queued_command(24, "prompt", "승인", uuid="approval"),
+    ]
+    return dashboard.split_work_items(lines, pipelines=HISTORY_PIPELINES)
+
+
+expect_predicate(
+    "활성 파이프라인 중 질문·승인은 귀속되고 AskUserQuestion tool_result 는 요청 아님",
+    active_pipeline_items,
+    lambda items: len(items) == 1
+    and items[0]["pipeline"] == "private-implement"
+    and items[0]["requestCount"] == 3,
+    "one active pipeline item with three requests",
+)
+
+
+def pipeline_boundary_items():
+    lines = [
+        history_record("user", 30, "파이프라인 경계를 검증합니다", uuid="boundary-start"),
+        tool_use(
+            31,
+            "toolu-boundary-skill",
+            "Skill",
+            {"skill": "private-implement", "args": "경계"},
+        ),
+        tool_use(
+            32,
+            "toolu-run-one",
+            "Bash",
+            {"command": "R=runs/private-implement/20261007-one && mkdir -p $R"},
+        ),
+        tool_use(
+            33,
+            "toolu-run-one-again",
+            "Bash",
+            {"command": "mkdir -p runs/private-implement/20261007-one/red"},
+        ),
+        tool_use(
+            34,
+            "toolu-run-two",
+            "Bash",
+            {"command": "mkdir -p runs/private-implement/20261007-two"},
+            uuid="run-two",
+        ),
+        tool_use(
+            35,
+            "toolu-other-pipeline",
+            "Skill",
+            {"skill": "private-roadmap", "args": "새 계획"},
+            uuid="other-pipeline",
+        ),
+    ]
+    return dashboard.split_work_items(lines, pipelines=HISTORY_PIPELINES)
+
+
+expect_predicate(
+    "같은 s3 run 은 귀속하고 다른 run id·다른 pipeline 은 각각 분할",
+    pipeline_boundary_items,
+    lambda items: len(items) == 3
+    and [item["pipeline"] for item in items]
+    == ["private-implement", "private-implement", "private-roadmap"]
+    and [item["runId"] for item in items[:2]]
+    == [
+        "runs/private-implement/20261007-one",
+        "runs/private-implement/20261007-two",
+    ]
+    and [item["id"] for item in items] == ["boundary-start", "run-two", "other-pipeline"],
+    "three items split at a different run id and a different pipeline",
+)
+
+expect_predicate(
+    "파이프라인 없는 미확정 작업의 Skill 호출은 분할 없이 pipeline 채택",
+    lambda: dashboard.split_work_items(
+        [
+            history_record("user", 40, "구현을 시작해 주세요", uuid="adopt-start"),
+            tool_use(
+                41,
+                "toolu-adopt",
+                "Skill",
+                {"skill": "private-implement", "args": "구현"},
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 1
+    and items[0]["id"] == "adopt-start"
+    and items[0]["pipeline"] == "private-implement",
+    "one adopted pipeline item",
+)
+
+
+def request_boundary_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user", 45, "첫 번째 독립 작업을 상세히 처리해 주세요", uuid="request-one"
+            ),
+            history_record("user", 46, "승인", uuid="request-one-followup"),
+            history_record("user", 46, "머지해", uuid="request-one-merge"),
+            queued_command(
+                47,
+                "prompt",
+                "두 번째 독립 작업을 상세히 처리해 주세요",
+                uuid="request-two",
+            ),
+            history_record("user", 48, "1", uuid="request-two-followup"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "파이프라인 밖 긴 요청마다 분할하고 짧은 후속은 직전 작업에 병합",
+    request_boundary_items,
+    lambda items: len(items) == 2
+    and [item["id"] for item in items] == ["request-one", "request-two"]
+    and [item["requestCount"] for item in items] == [3, 2],
+    "two items with short 승인·머지해·1 follow-ups merged",
+)
+
+long_title = "가" * 90
+title_items_action = lambda: dashboard.split_work_items(
+    [
+        history_record("user", 50, f"\n\n{long_title}\n둘째 줄", uuid="long-title"),
+        assistant_text(50, "첫 번째 작업을 모두 완료했습니다"),
+        history_record(
+            "user",
+            51,
+            slash_request("private-roadmap", "분기별 계획을 작성해 주세요"),
+            uuid="slash-title",
+        ),
+    ],
+    pipelines=HISTORY_PIPELINES,
+)
+expect_predicate(
+    "title 은 첫 의미 있는 줄 80자, 슬래시는 pipeline 과 command-args 조합",
+    title_items_action,
+    lambda items: len(items) == 2
+    and items[0]["title"] == long_title[:80]
+    and items[1]["title"] == "/private-roadmap 분기별 계획을 작성해 주세요",
+    "contract titles for plain and slash requests",
+)
+
+
+def stepped_work_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                55,
+                slash_request("private-implement", "단계 추적"),
+                uuid="stepped-work",
+            ),
+            assistant_text(56, "현재 Step 1 진행 중입니다. 다음은 Step 4입니다."),
+            assistant_text(57, "현재 Step 3 검증 중입니다."),
+            assistant_text(58, "Step 3 검증을 계속합니다."),
+            assistant_text(59, "현재 Step 7 진행 중입니다."),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+
+
+expect_predicate(
+    "Step 변화는 예고·연속 중복을 제외하고 title·70% basis 를 보존",
+    stepped_work_items,
+    lambda items: len(items) == 1
+    and set(items[0])
+    == {
+        "id",
+        "title",
+        "startedAt",
+        "endedAt",
+        "requestCount",
+        "pipeline",
+        "runId",
+        "stepPath",
+        "finalStep",
+        "steps",
+        "progress",
+        "result",
+        "subagents",
+        "backgroundShells",
+        "failedTasks",
+    }
+    and items[0]["stepPath"] == [1, 3, 7]
+    and items[0]["finalStep"] == 7
+    and items[0]["steps"]
+    == [
+        {"at": utc_ms(history_timestamp(56)), "step": 1, "title": "구현 1"},
+        {"at": utc_ms(history_timestamp(57)), "step": 3, "title": "구현 3"},
+        {"at": utc_ms(history_timestamp(59)), "step": 7, "title": "구현 7"},
+    ]
+    and items[0]["progress"]
+    == {
+        "percent": 70,
+        "basis": "/private-implement Step 7 (7/10단계 진행 중)",
+    },
+    "stepPath [1, 3, 7], titled steps, and 70 percent",
+)
+
+
+def result_work_items():
+    return dashboard.split_work_items(
+        [
+            history_record("user", 65, "완료될 첫 번째 작업 요청입니다", uuid="completed-work"),
+            assistant_text(66, "요청한 변경을 모두 완료했습니다"),
+            history_record("user", 67, "설명만 필요한 두 번째 질문입니다", uuid="answered-work"),
+            assistant_text(68, "질문의 배경과 선택지를 설명합니다"),
+            history_record("user", 69, "중단될 세 번째 작업 요청입니다", uuid="interrupted-work"),
+            history_record("user", 70, "[Request interrupted by user for tool use]"),
+            history_record("user", 71, "현재 진행 중인 마지막 작업입니다", uuid="running-work"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_equal(
+    "작업 결과는 completed·answered·interrupted·in_progress 4값",
+    lambda: [item["result"] for item in result_work_items()],
+    ["completed", "answered", "interrupted", "in_progress"],
+)
+expect_equal(
+    "work_summary 는 결과 4값을 모두 집계",
+    lambda: dashboard.work_summary(result_work_items()),
+    {
+        "total": 4,
+        "completed": 1,
+        "inProgress": 1,
+        "answered": 1,
+        "interrupted": 1,
+    },
+)
+
+
+def interrupted_pipeline_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                75,
+                slash_request("private-implement", "중단 basis"),
+                uuid="interrupted-pipeline",
+            ),
+            assistant_text(76, "현재 Step 3 진행 중입니다."),
+            tool_use(
+                77,
+                "toolu-roadmap-boundary",
+                "Skill",
+                {"skill": "private-roadmap", "args": "다른 파이프라인"},
+                uuid="roadmap-boundary",
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "마지막 Step 이 아닌 파이프라인 작업은 중단 결과와 중단 basis 사용",
+    interrupted_pipeline_items,
+    lambda items: items[0]["result"] == "interrupted"
+    and items[0]["progress"]
+    == {
+        "percent": 30,
+        "basis": "/private-implement Step 3 (3/10단계에서 중단)",
+    },
+    "interrupted step 3 progress basis",
+)
+
+
+def task_count_items():
+    lines = [
+        history_record(
+            "user",
+            80,
+            slash_request("private-implement", "도구 수 집계"),
+            uuid="counted-work",
+        ),
+        tool_use(
+            81,
+            "toolu-agent-counted",
+            "Agent",
+            {"description": "에이전트", "prompt": "조사", "subagent_type": "Explore"},
+        ),
+        tool_use(
+            82,
+            "toolu-task-counted",
+            "Task",
+            {"description": "태스크", "prompt": "검증", "subagent_type": "general-purpose"},
+        ),
+        tool_use(
+            83,
+            "toolu-shell-counted",
+            "Bash",
+            {"command": "false", "description": "실패 셸", "run_in_background": True},
+        ),
+        tool_use(
+            84,
+            "toolu-count-boundary",
+            "Skill",
+            {"skill": "private-roadmap", "args": "경계"},
+            uuid="count-boundary",
+        ),
+        queued_command(
+            85,
+            "task-notification",
+            notification(
+                "toolu-shell-counted",
+                "failed",
+                'Background command "false" failed (exit code 1)',
+            ),
+        ),
+    ]
+    return dashboard.split_work_items(lines, pipelines=HISTORY_PIPELINES)
+
+
+expect_predicate(
+    "subagents·backgroundShells·failedTasks 는 시작 작업 기준으로 집계",
+    task_count_items,
+    lambda items: items[0]["subagents"] == 2
+    and items[0]["backgroundShells"] == 1
+    and items[0]["failedTasks"] == 1
+    and items[1]["failedTasks"] == 0,
+    "2 subagents, 1 background shell, 1 failed task on the origin work",
+)
+
+
+def broken_line_items(include_broken):
+    lines = [
+        history_record("user", 90, "깨진 줄 전의 작업 요청입니다", uuid="broken-one"),
+        history_record("user", 91, "깨진 줄 뒤의 별도 작업 요청입니다", uuid="broken-two"),
+    ]
+    if include_broken:
+        lines[1:1] = [
+            "{broken json",
+            json.dumps({"type": "assistant", "message": {"content": []}}),
+        ]
+    return dashboard.split_work_items(lines, pipelines=HISTORY_PIPELINES)
+
+
+expect_equal(
+    "깨진 JSON·timestamp 없는 줄은 건너뛰어 분할 결과를 바꾸지 않음",
+    lambda: broken_line_items(True),
+    broken_line_items(False) if hasattr(dashboard, "split_work_items") else [],
+)
+
+
+def preserved_progress_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                95,
+                slash_request("private-implement", "이전 작업"),
+                uuid="preserved-work",
+            ),
+            assistant_text(96, "현재 Step 7 진행 중입니다."),
+            tool_use(
+                97,
+                "toolu-new-roadmap",
+                "Skill",
+                {"skill": "private-roadmap", "args": "새 작업"},
+                uuid="new-roadmap",
+            ),
+            assistant_text(98, "private-roadmap 현재 Step 8 진행 중입니다."),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "다음 작업 Step 변화 뒤에도 이전 작업의 stepPath·진행률을 보존",
+    preserved_progress_items,
+    lambda items: len(items) == 2
+    and items[0]["stepPath"] == [7]
+    and items[0]["progress"]["percent"] == 70
+    and items[1]["stepPath"] == [8],
+    "previous 70 percent remains after the next work reaches Step 8",
+)
+
+
+print("H3 관측 히스토리")
+expect_equal(
+    "히스토리 상수는 스키마·추적 필드·상한·압축 임계값 계약과 일치",
+    lambda: {
+        "version": dashboard.HISTORY_SCHEMA_VERSION,
+        "fields": dashboard.HISTORY_TRACKED_FIELDS,
+        "points": dashboard.HISTORY_POINTS_PER_SESSION,
+        "compact": dashboard.HISTORY_COMPACT_LINES,
+    },
+    {
+        "version": 1,
+        "fields": ("status", "percent", "basis", "pipeline", "step"),
+        "points": 500,
+        "compact": 20_000,
+    },
+)
+
+
+def history_session(session_id="history-session", **overrides):
+    value = {
+        "id": session_id,
+        "name": "히스토리 세션",
+        "path": "/tmp/history-worktree",
+        "agentType": "claude",
+        "status": "running",
+        "progress": {"percent": 30, "basis": "Step 근거"},
+        "checklist": {
+            "pipeline": "private-implement",
+            "steps": [
+                {"number": 1, "title": "준비", "state": "done"},
+                {"number": 3, "title": "검증", "state": "current"},
+            ],
+        },
+    }
+    value.update(overrides)
+    return value
+
+
+expect_equal(
+    "history_point 는 공개 세션 필드와 현재 pipeline·step 을 평탄화",
+    lambda: dashboard.history_point(history_session(), 1234),
+    {
+        "v": 1,
+        "at": 1234,
+        "sessionId": "history-session",
+        "name": "히스토리 세션",
+        "path": "/tmp/history-worktree",
+        "agentType": "claude",
+        "status": "running",
+        "percent": 30,
+        "basis": "Step 근거",
+        "pipeline": "private-implement",
+        "step": 3,
+    },
+)
+
+
+def history_change_result():
+    first = dashboard.history_point(history_session("unchanged"), 100)
+    changed_before = dashboard.history_point(history_session("changed"), 100)
+    snapshot = {
+        "error": None,
+        "sessions": [
+            history_session("unchanged", name="표시명만 변경"),
+            history_session(
+                "changed", progress={"percent": 40, "basis": "새 근거"}
+            ),
+            history_session("new"),
+        ],
+    }
+    return dashboard.history_changes(
+        {"unchanged": first, "changed": changed_before}, snapshot, 200
+    )
+
+
+expect_predicate(
+    "history_changes 는 추적 필드가 바뀐 세션과 신규 세션만 반환",
+    history_change_result,
+    lambda points: [point["sessionId"] for point in points] == ["changed", "new"]
+    and all(point["at"] == 200 for point in points),
+    "changed and new sessions only",
+)
+expect_equal(
+    "같은 snapshot 연속 관측은 변화 없음",
+    lambda: dashboard.history_changes(
+        {"same": dashboard.history_point(history_session("same"), 100)},
+        {"error": None, "sessions": [history_session("same")]},
+        200,
+    ),
+    [],
+)
+expect_equal(
+    "error snapshot 은 히스토리 기록 대상 없음",
+    lambda: dashboard.history_changes(
+        {}, {"error": "수집 실패", "sessions": [history_session()]}, 200
+    ),
+    [],
+)
+
+
+def parse_history_fixture():
+    valid_lines = [
+        json.dumps(
+            {
+                "v": 1,
+                "at": at,
+                "sessionId": "capped",
+                "status": "running",
+                "percent": at,
+            }
+        )
+        for at in range(502, 0, -1)
+    ]
+    invalid_lines = [
+        "{broken",
+        json.dumps([]),
+        json.dumps({"v": 2, "at": 1, "sessionId": "wrong-version"}),
+        json.dumps({"v": 1, "at": 1, "sessionId": ""}),
+        json.dumps({"v": 1, "at": "1", "sessionId": "bad-at"}),
+    ]
+    return dashboard.parse_history(invalid_lines + valid_lines)
+
+
+expect_predicate(
+    "parse_history 는 잘못된 줄을 건너뛰고 세션별 시간순 마지막 500개 유지",
+    parse_history_fixture,
+    lambda points: list(points) == ["capped"]
+    and len(points["capped"]) == 500
+    and points["capped"][0]["at"] == 3
+    and points["capped"][-1]["at"] == 502,
+    "only valid capped points sorted from at=3 through at=502",
+)
+
+
+print("H4 HistoryStore")
+expect_equal(
+    "history_path 는 비어 있지 않은 env 디렉토리를 우선",
+    lambda: dashboard.history_path(
+        {"ORCA_DASHBOARD_HISTORY_DIR": "/tmp/custom-history"}
+    ),
+    "/tmp/custom-history/history.jsonl",
+)
+expect_equal(
+    "history_path 기본값은 __file__ 과 무관한 expanduser 홈 하위",
+    lambda: dashboard.history_path({}),
+    str(Path.home() / ".harness" / "runs" / "orca-dashboard" / "history.jsonl"),
+)
+expect_equal(
+    "history_path 는 빈 env 값을 기본 expanduser 경로로 처리",
+    lambda: dashboard.history_path({"ORCA_DASHBOARD_HISTORY_DIR": ""}),
+    str(Path.home() / ".harness" / "runs" / "orca-dashboard" / "history.jsonl"),
+)
+
+
+def history_store_restart_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard history restart ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        snapshot = {"error": None, "sessions": [history_session()]}
+        first_store = dashboard.HistoryStore(str(path))
+        first_warnings = first_store.record(snapshot, 100)
+        second_store = dashboard.HistoryStore(str(path))
+        load_warnings = second_store.load()
+        before = second_store.points("history-session")
+        duplicate_warnings = second_store.record(snapshot, 200)
+        after = second_store.points("history-session")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return first_warnings, load_warnings, duplicate_warnings, before, after, lines
+
+
+expect_predicate(
+    "HistoryStore 는 재시작 load 후 같은 점을 중복 기록하지 않음",
+    history_store_restart_observation,
+    lambda result: result[0] == []
+    and result[1] == []
+    and result[2] == []
+    and result[3] == result[4]
+    and len(result[3]) == 1
+    and len(result[5]) == 1,
+    "one persisted point before and after restart",
+)
+
+
+def history_store_broken_tail_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard history broken ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        path.write_text('{"v":1,"at":', encoding="utf-8")
+        store = dashboard.HistoryStore(str(path))
+        warnings = store.record(
+            {"error": None, "sessions": [history_session("after-broken")]}, 300
+        )
+        reloaded = dashboard.HistoryStore(str(path))
+        load_warnings = reloaded.load()
+        return warnings, load_warnings, reloaded.points("after-broken"), path.read_bytes()
+
+
+expect_predicate(
+    "개행 없이 잘린 마지막 조각 뒤 기록은 새 줄로 온전히 복원",
+    history_store_broken_tail_observation,
+    lambda result: result[0] == []
+    and result[1] == []
+    and len(result[2]) == 1
+    and b'\n{"v"' in result[3],
+    "one valid point after the broken fragment and an inserted newline",
+)
+
+
+def history_store_write_failure_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard history write failure ") as temporary_directory:
+        blocker = Path(temporary_directory) / "not-a-directory"
+        blocker.write_text("block", encoding="utf-8")
+        store = dashboard.HistoryStore(str(blocker / "history.jsonl"))
+        return store.record(
+            {"error": None, "sessions": [history_session("write-failure")]}, 400
+        )
+
+
+expect_predicate(
+    "HistoryStore 쓰기 실패는 예외 없이 history 기록 실패 warning",
+    history_store_write_failure_observation,
+    lambda warnings: len(warnings) == 1
+    and warnings[0].startswith("history 기록 실패 ")
+    and "history.jsonl" in warnings[0],
+    "one history write warning containing the target path",
+)
+
+
+def history_store_read_failure_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard history read failure ") as temporary_directory:
+        store = dashboard.HistoryStore(temporary_directory)
+        return store.load()
+
+
+expect_predicate(
+    "HistoryStore 읽기 실패는 history 읽기 실패 warning",
+    history_store_read_failure_observation,
+    lambda warnings: len(warnings) == 1
+    and warnings[0].startswith("history 읽기 실패 "),
+    "one history read warning",
+)
+
+
+def history_store_compaction_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard history compact ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            for index in range(20_001):
+                session_id = "compact-a" if index % 2 == 0 else "compact-b"
+                handle.write(
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "at": index,
+                            "sessionId": session_id,
+                            "status": "running",
+                            "percent": index % 101,
+                            "basis": "fixture",
+                            "pipeline": None,
+                            "step": None,
+                        }
+                    )
+                    + "\n"
+                )
+        store = dashboard.HistoryStore(str(path))
+        store.load()
+        warnings = store.record(
+            {"error": None, "sessions": [history_session("compact-new")]}, 30_000
+        )
+        reloaded = dashboard.HistoryStore(str(path))
+        load_warnings = reloaded.load()
+        line_count = len(path.read_text(encoding="utf-8").splitlines())
+        return warnings, load_warnings, line_count, {
+            session_id: len(reloaded.points(session_id))
+            for session_id in ("compact-a", "compact-b", "compact-new")
+        }
+
+
+expect_predicate(
+    "압축 임계값 초과 시 세션별 상한만 남기고 재로드 결과 유지",
+    history_store_compaction_observation,
+    lambda result: result[0] == []
+    and result[1] == []
+    and result[2] == 1001
+    and result[3] == {"compact-a": 500, "compact-b": 500, "compact-new": 1},
+    "1001 compacted lines and 500/500/1 points after reload",
+)
+
+
+print("H5·H6 serve·API 연동")
+with tempfile.TemporaryDirectory(prefix="orca dashboard snapshot no history ") as temporary_directory:
+    snapshot_only_env = fixture_environment(temporary_directory)
+    snapshot_only_process = subprocess.run(
+        [sys.executable, str(DASHBOARD_PATH), "snapshot"],
+        cwd=ROOT,
+        env=snapshot_only_env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    check(
+        "snapshot 서브커맨드는 성공해도 history.jsonl 을 기록하지 않음",
+        snapshot_only_process.returncode == 0
+        and not (
+            Path(snapshot_only_env["ORCA_DASHBOARD_HISTORY_DIR"])
+            / "history.jsonl"
+        ).exists(),
+        f"exit={snapshot_only_process.returncode}, stderr={snapshot_only_process.stderr[-500:]!r}",
+    )
+
+expect_equal(
+    "build_detail 은 transcript 없어도 신규 API 키 4개를 항상 포함",
+    lambda: {
+        key: dashboard.build_detail(DETAIL_SESSION, None, now_ms=NOW_MS)[key]
+        for key in ("workItems", "workSummary", "progressSeries", "historyWarnings")
+    },
+    {
+        "workItems": [],
+        "workSummary": {
+            "total": 0,
+            "completed": 0,
+            "inProgress": 0,
+            "answered": 0,
+            "interrupted": 0,
+        },
+        "progressSeries": [],
+        "historyWarnings": [],
+    },
+)
+
+
+def snapshot_work_summary_key():
+    sample_worktree = worktree(
+        "wt-work-summary",
+        agents=[
+            agent(
+                "tab-work-summary:leaf",
+                prompt="work summary key",
+                lastAssistantMessage="fixture",
+            )
+        ],
+        liveTerminalCount=1,
+    )
+    sample_terminal = terminal(
+        "term-work-summary", "wt-work-summary", "tab-work-summary", "leaf"
+    )
+    snapshot = dashboard.build_snapshot(
+        [sample_worktree],
+        [sample_terminal],
+        {"term-work-summary": ["⏺ fixture"]},
+        now_ms=NOW_MS,
+        pipelines=HISTORY_PIPELINES,
+    )
+    return snapshot["sessions"][0]
+
+
+expect_predicate(
+    "snapshot 세션은 workSummary 키를 항상 가지며 기본 수집은 None",
+    snapshot_work_summary_key,
+    lambda session: "workSummary" in session and session["workSummary"] is None,
+    "workSummary key with None when no transcript is connected",
+)
+
+
+HISTORY_SERVE_STUB = r'''#!/usr/bin/env python3
+import json
+import os
+import sys
+
+arguments = sys.argv[1:]
+if arguments[-1:] == ["--json"]:
+    arguments = arguments[:-1]
+
+cycle_path = os.environ["HISTORY_STUB_CYCLE_FILE"]
+if arguments == ["worktree", "ps"]:
+    try:
+        with open(cycle_path, encoding="utf-8") as handle:
+            cycle = int(handle.read()) + 1
+    except (FileNotFoundError, ValueError):
+        cycle = 1
+    with open(cycle_path, "w", encoding="utf-8") as handle:
+        handle.write(str(cycle))
+    step = 1 if cycle == 1 else 2
+    result = {"worktrees": [{
+        "worktreeId": "wt-history-serve",
+        "repoId": "repo-history-serve",
+        "repo": "acme/history",
+        "displayName": "History serve",
+        "path": "/tmp/h5-worktree",
+        "branch": "refs/heads/feat/history",
+        "isArchived": False,
+        "workspaceStatus": "in-progress",
+        "comment": "",
+        "liveTerminalCount": 1,
+        "lastOutputAt": 1791363251848 + cycle,
+        "linkedPR": None,
+        "agents": [{
+            "paneKey": "tab-history:leaf-history",
+            "parentPaneKey": None,
+            "state": "working",
+            "agentType": "claude",
+            "prompt": "히스토리 누적 통합 요청",
+            "lastAssistantMessage": "/private-implement Step %d 진행 중" % step,
+            "toolName": "Bash",
+            "toolInput": "python3 tests/test_orca_dashboard.py",
+            "interrupted": False,
+            "mainAgent": {"state": "working", "stateStartedAt": 1791362716595},
+            "stateStartedAt": 1791362852461,
+            "updatedAt": 1791363253026 + cycle
+        }]
+    }]}
+elif arguments == ["terminal", "list"]:
+    result = {"terminals": [{
+        "handle": "term-history",
+        "worktreeId": "wt-history-serve",
+        "worktreePath": "/tmp/h5-worktree",
+        "branch": "refs/heads/feat/history",
+        "tabId": "tab-history",
+        "leafId": "leaf-history",
+        "title": "✳ History serve",
+        "connected": True,
+        "lastOutputAt": 1791363251848,
+        "preview": "fixture"
+    }]}
+elif arguments[:2] == ["terminal", "read"]:
+    try:
+        with open(cycle_path, encoding="utf-8") as handle:
+            cycle = int(handle.read())
+    except (FileNotFoundError, ValueError):
+        cycle = 1
+    step = 1 if cycle == 1 else 2
+    result = {"terminal": {
+        "handle": "term-history",
+        "tail": ["⏺ /private-implement Step %d 진행 중" % step]
+    }}
+else:
+    print(json.dumps({"ok": False, "error": "unexpected arguments: " + repr(arguments)}))
+    raise SystemExit(1)
+
+print(json.dumps({"ok": True, "result": result}))
+'''
+
+
+def history_serve_environment(temporary_directory):
+    temporary_root = Path(temporary_directory)
+    stub_path = temporary_root / "orca history fixture.py"
+    stub_path.write_text(HISTORY_SERVE_STUB, encoding="utf-8")
+    projects_root = temporary_root / "claude-projects"
+    transcript_directory = Path(
+        dashboard.transcript_dir(str(projects_root), "/tmp/h5-worktree")
+    )
+    transcript_directory.mkdir(parents=True)
+    transcript_lines = [
+        history_record(
+            "user",
+            106,
+            slash_request("private-roadmap", "먼저 완료할 작업"),
+            uuid="serve-work-completed",
+        ),
+        assistant_text(107, "현재 Step 1 진행 중입니다."),
+        assistant_text(108, "첫 번째 작업을 모두 완료했습니다"),
+        history_record("user", 110, "히스토리 누적 통합 요청", uuid="serve-work-running"),
+        tool_use(
+            111,
+            "toolu-serve-skill",
+            "Skill",
+            {"skill": "private-implement", "args": "히스토리"},
+        ),
+        assistant_text(112, "현재 Step 1 진행 중입니다."),
+        assistant_text(113, "현재 Step 2 진행 중입니다."),
+    ]
+    (transcript_directory / "serve.jsonl").write_text(
+        "\n".join(transcript_lines) + "\n", encoding="utf-8"
+    )
+    environment = os.environ.copy()
+    environment["ORCA_CLI_COMMAND"] = shlex.join([sys.executable, str(stub_path)])
+    environment["ORCA_DASHBOARD_HISTORY_DIR"] = str(temporary_root / "history")
+    environment["CLAUDE_PROJECTS_DIR"] = str(projects_root)
+    environment["HISTORY_STUB_CYCLE_FILE"] = str(temporary_root / "cycle.txt")
+    return environment
+
+
+def wait_for_history_lines(process, path, minimum, timeout):
+    deadline = time.monotonic() + timeout
+    detail = "history file was not created"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stderr = process.stderr.read() if process.stderr else ""
+            return None, f"server exited {process.returncode}: {stderr[-800:]}"
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            detail = f"history lines={len(lines)}"
+            if len(lines) >= minimum:
+                return lines, ""
+        except OSError as error:
+            detail = f"{type(error).__name__}: {error}"
+        time.sleep(0.03)
+    return None, detail
+
+
+def run_history_serve(port, environment):
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(DASHBOARD_PATH),
+            "serve",
+            "--port",
+            str(port),
+            "--interval",
+            "0.15",
+        ],
+        cwd=ROOT,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard history serve ") as temporary_directory:
+    history_env = history_serve_environment(temporary_directory)
+    history_path = Path(history_env["ORCA_DASHBOARD_HISTORY_DIR"]) / "history.jsonl"
+    history_port = unused_local_port()
+    history_process = run_history_serve(history_port, history_env)
+    history_lines = None
+    history_detail = "history server did not become ready"
+    first_detail_payload = None
+    first_snapshot_payload = None
+    try:
+        first_snapshot_payload, history_detail = wait_for_snapshot(
+            history_process,
+            history_port,
+            lambda payload: any(
+                session.get("id") == "tab-history:leaf-history"
+                and isinstance(session.get("workSummary"), dict)
+                for session in payload.get("sessions", [])
+            ),
+            timeout=6,
+        )
+        history_lines, line_error = wait_for_history_lines(
+            history_process, history_path, 2, timeout=6
+        )
+        if history_lines is None:
+            history_detail = line_error
+        if first_snapshot_payload is not None and history_lines is not None:
+            response = http_response(
+                f"http://127.0.0.1:{history_port}/api/session?id=tab-history:leaf-history"
+            )
+            if response[0] == 200:
+                first_detail_payload = json.loads(response[2])
+    finally:
+        stop_process(history_process)
+
+    restart_port = unused_local_port()
+    restart_process = run_history_serve(restart_port, history_env)
+    restart_detail_payload = None
+    restart_error = "restart server did not become ready"
+    try:
+        restart_snapshot, restart_error = wait_for_snapshot(
+            restart_process,
+            restart_port,
+            lambda payload: any(
+                session.get("id") == "tab-history:leaf-history"
+                for session in payload.get("sessions", [])
+            ),
+            timeout=6,
+        )
+        if restart_snapshot is not None:
+            response = http_response(
+                f"http://127.0.0.1:{restart_port}/api/session?id=tab-history:leaf-history"
+            )
+            if response[0] == 200:
+                restart_detail_payload = json.loads(response[2])
+    finally:
+        stop_process(restart_process)
+
+    check(
+        "serve 진행률 변화 2주기는 history.jsonl 에 정확히 2줄 기록",
+        history_lines is not None
+        and len(history_lines) == 2
+        and all(json.loads(line)["sessionId"] == "tab-history:leaf-history" for line in history_lines),
+        history_detail,
+    )
+    check(
+        "serve /api/session 은 transcript·dashboard progressSeries 와 신규 키를 반환",
+        isinstance(first_detail_payload, dict)
+        and all(
+            key in first_detail_payload
+            for key in ("workItems", "workSummary", "progressSeries", "historyWarnings")
+        )
+        and first_detail_payload["workItems"]
+        and first_detail_payload["workSummary"]["total"] == 2
+        and {point["source"] for point in first_detail_payload["progressSeries"]}
+        == {"transcript", "dashboard"}
+        and {
+            point["workId"]
+            for point in first_detail_payload["progressSeries"]
+            if point["source"] == "transcript"
+        }
+        == {"serve-work-completed", "serve-work-running"}
+        and all(
+            point["workId"] is None
+            for point in first_detail_payload["progressSeries"]
+            if point["source"] == "dashboard"
+        )
+        and len(
+            [
+                point
+                for point in first_detail_payload["progressSeries"]
+                if point["source"] == "dashboard"
+            ]
+        )
+        == 2,
+        history_detail if first_detail_payload is None else repr(first_detail_payload),
+    )
+    check(
+        "serve 재시작 후 /api/session progressSeries 에 기존 관측 2점 유지",
+        isinstance(restart_detail_payload, dict)
+        and len(
+            [
+                point
+                for point in restart_detail_payload.get("progressSeries", [])
+                if point.get("source") == "dashboard"
+            ]
+        )
+        == 2,
+        restart_error if restart_detail_payload is None else repr(restart_detail_payload),
+    )
+
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard history warning ") as temporary_directory:
+    warning_root = Path(temporary_directory)
+    warning_env = history_serve_environment(temporary_directory)
+    blocked_history_directory = warning_root / "history-blocker"
+    blocked_history_directory.write_text("not a directory", encoding="utf-8")
+    warning_env["ORCA_DASHBOARD_HISTORY_DIR"] = str(blocked_history_directory)
+    warning_port = unused_local_port()
+    warning_process = run_history_serve(warning_port, warning_env)
+    warning_snapshot = None
+    warning_detail_payload = None
+    warning_error = "history warning was not observed"
+    try:
+        warning_snapshot, warning_error = wait_for_snapshot(
+            warning_process,
+            warning_port,
+            lambda payload: payload.get("error") is None
+            and payload.get("sessions")
+            and any("history 기록 실패" in warning for warning in payload.get("warnings", [])),
+            timeout=6,
+        )
+        if warning_snapshot is not None:
+            response = http_response(
+                f"http://127.0.0.1:{warning_port}/api/session?id=tab-history:leaf-history"
+            )
+            if response[0] == 200:
+                warning_detail_payload = json.loads(response[2])
+    finally:
+        stop_process(warning_process)
+    check(
+        "히스토리 기록 실패는 snapshot error 가 아니라 warnings 만 남기고 sessions 갱신",
+        isinstance(warning_snapshot, dict)
+        and warning_snapshot.get("error") is None
+        and warning_snapshot.get("sessions")
+        and any(
+            "history 기록 실패" in warning
+            for warning in warning_snapshot.get("warnings", [])
+        )
+        and any(
+            "history 읽기 실패" in warning
+            for warning in warning_snapshot.get("warnings", [])
+        )
+        and isinstance(warning_detail_payload, dict)
+        and any(
+            "history 기록 실패" in warning
+            for warning in warning_detail_payload.get("historyWarnings", [])
+        ),
+        warning_error
+        if warning_snapshot is None
+        else f"snapshot={warning_snapshot!r}, detail={warning_detail_payload!r}",
     )
 
 
@@ -3337,6 +4600,7 @@ function session(id, name) {
     agentType: "claude", agentState: "done", mainState: "done", toolName: "Agent",
     status: "idle", reason: "응답 완료 — 다음 지시 대기", summary: {text: name + " 요약", source: "lastMessage"},
     progress: {percent: 50, basis: "테스트 진행률"}, checklist: null,
+    workSummary: id === "C" ? null : {total: 4, completed: 1, inProgress: 1, answered: 1, interrupted: 1},
     lastOutputAt: 1900000, pr: null,
   };
 }
@@ -3348,10 +4612,47 @@ const snapshotPayload = {
 };
 function detailPayload(id) {
   const selected = sessions.find((item) => item.id === id);
+  const workItems = [
+    {id: "work-completed", title: "완료한 이전 작업", startedAt: 100, endedAt: 110,
+      requestCount: 1, pipeline: "private-implement", runId: null, stepPath: [1, 2], finalStep: 2,
+      steps: [{at: 100, step: 1, title: "준비"}, {at: 105, step: 2, title: "구현"}],
+      progress: {percent: 100, basis: "완료 보고"}, result: "completed",
+      subagents: 1, backgroundShells: 2, failedTasks: 0},
+    {id: "work-answered", title: "설명으로 끝난 작업", startedAt: 120, endedAt: 130,
+      requestCount: 1, pipeline: null, runId: null, stepPath: [], finalStep: null, steps: [],
+      progress: {percent: null, basis: "산정 불가"}, result: "answered",
+      subagents: 0, backgroundShells: 0, failedTasks: 0},
+    {id: "work-interrupted", title: "중단된 작업", startedAt: 140, endedAt: 150,
+      requestCount: 1, pipeline: "private-roadmap", runId: null, stepPath: [3], finalStep: 3,
+      steps: [{at: 145, step: 3, title: "검증"}],
+      progress: {percent: 33, basis: "/private-roadmap Step 3 (3/9단계에서 중단)"}, result: "interrupted",
+      subagents: 0, backgroundShells: 1, failedTasks: 1},
+    {id: "work-running", title: "현재 진행 중인 최신 작업", startedAt: 200, endedAt: 240,
+      requestCount: 2, pipeline: "private-implement", runId: "runs/private-implement/20261007-ui",
+      stepPath: [1, 3, 7], finalStep: 7,
+      steps: [{at: 200, step: 1, title: "준비"}, {at: 210, step: 3, title: "검증"}, {at: 240, step: 7, title: "마무리"}],
+      progress: {percent: 70, basis: "/private-implement Step 7 (7/10단계 진행 중)"}, result: "in_progress",
+      subagents: 2, backgroundShells: 1, failedTasks: 0},
+  ];
+  const progressSeries = id === "B" ? [
+    {at: 100, percent: 10, basis: "한 점", source: "transcript", workId: "work-completed"},
+  ] : [
+    {at: 100, percent: 10, basis: "work 1 시작", source: "transcript", workId: "work-completed"},
+    {at: 105, percent: 30, basis: "관측 시작", source: "dashboard", workId: null},
+    {at: 110, percent: 100, basis: "완료 보고", source: "transcript", workId: "work-completed"},
+    {at: 200, percent: 20, basis: "work 4 Step 2", source: "transcript", workId: "work-running"},
+    {at: 210, percent: 30, basis: "work 4 Step 3", source: "transcript", workId: "work-running"},
+    {at: 220, percent: null, basis: "산정 불가", source: "transcript", workId: "work-running"},
+    {at: 230, percent: 60, basis: "work 4 Step 6", source: "transcript", workId: "work-running"},
+    {at: 240, percent: 70, basis: "work 4 Step 7", source: "transcript", workId: "work-running"},
+    {at: 245, percent: 70, basis: "관측 최신", source: "dashboard", workId: null},
+  ];
   return {
     session: selected,
     agents: {main: {name: selected.name, agentType: "claude", state: "done", toolName: "Agent"}, children: []},
     timeline: [], blockers: [], transcript: false,
+    workItems, workSummary: selected.workSummary || {total: 0, completed: 0, inProgress: 0, answered: 0, interrupted: 0},
+    progressSeries, historyWarnings: [],
   };
 }
 function response(payload, status = 200, textPromise = null, jsonPromise = null) {
@@ -3393,12 +4694,48 @@ NODE_UI_SCENARIOS = r"""
     for (let index = 0; index < 12; index += 1) await Promise.resolve();
   };
   const text = (id) => document.getElementById(id).textContent;
+  const descendants = (root) => {
+    const result = [];
+    const visit = (node) => { result.push(node); for (const child of node.children) visit(child); };
+    visit(root);
+    return result;
+  };
+  const ancestor = (node, predicate) => {
+    for (let current = node; current; current = current.parentNode) if (predicate(current)) return current;
+    return null;
+  };
   await settle();
+
+  const initialCards = document.getElementById("cards").children;
+  const cardSummary = initialCards[0].textContent.includes("작업 4 · 완료 1")
+    && initialCards[0].textContent.includes("진행 중 1")
+    && initialCards[0].textContent.includes("중단 1")
+    && !initialCards[2].textContent.includes("작업 4 · 완료 1");
 
   const firstCard = document.getElementById("cards").children[0];
   firstCard.dispatchEvent({type: "click"});
   await settle();
   const cardClick = location.hash === "#session=A" && !detailView.hidden && text("detail-body").includes("세션 A");
+  const detailNodes = descendants(document.getElementById("detail-body"));
+  const exactTitle = (title) => detailNodes.find((node) => node.textContent === title);
+  const latestTitle = exactTitle("현재 진행 중인 최신 작업");
+  const historyTitleNodes = ["완료한 이전 작업", "설명으로 끝난 작업", "중단된 작업", "현재 진행 중인 최신 작업"]
+    .flatMap((title) => detailNodes.filter((node) => node.textContent === title));
+  const historyRows = historyTitleNodes.length === 4;
+  const latestExpanded = Boolean(latestTitle)
+    && Boolean(ancestor(latestTitle, (node) => node.attributes["aria-current"] === "true"))
+    && !ancestor(latestTitle, (node) => node.tagName === "details");
+  const pastCollapsed = ["완료한 이전 작업", "설명으로 끝난 작업", "중단된 작업"]
+    .every((title) => Boolean(ancestor(exactTitle(title), (node) => node.tagName === "details")));
+  const historyLabels = ["✔", "▶", "◦", "✕", "완료", "진행 중", "응답 종료", "중단",
+    "private-implement", "private-roadmap", "산정 불가", "Step 1", "Step 7", "서브에이전트", "셸"]
+    .every((label) => text("detail-body").includes(label))
+    && /\d{1,2}:\d{2}/.test(text("detail-body"));
+  const polylines = detailNodes.filter((node) => node.tagName === "polyline");
+  const pointTitles = detailNodes.filter((node) => node.tagName === "title");
+  const trendSegments = polylines.length === 4
+    && pointTitles.some((node) => node.textContent.includes("work 4 Step 7"))
+    && pointTitles.some((node) => node.textContent.includes("관측 최신"));
 
   document.getElementById("back").dispatchEvent({type: "click"});
   await settle();
@@ -3407,6 +4744,7 @@ NODE_UI_SCENARIOS = r"""
   secondCard.dispatchEvent({type: "keydown", key: "Enter", preventDefault() { enterPrevented = true; }});
   await settle();
   const enterKey = enterPrevented && location.hash === "#session=B" && text("detail-body").includes("세션 B");
+  const trendInsufficient = text("detail-body").includes("추이 기록 부족");
 
   document.getElementById("back").dispatchEvent({type: "click"});
   await settle();
@@ -3435,7 +4773,8 @@ NODE_UI_SCENARIOS = r"""
   await settle();
   const retryRecovery = cFailures === 1 && errorShown && !text("banner").includes("fixture network failure") && text("detail-body").includes("세션 C");
 
-  process.stdout.write(JSON.stringify({cardClick, enterKey, backToList, responseRace, retryRecovery}));
+  process.stdout.write(JSON.stringify({cardClick, enterKey, backToList, responseRace, retryRecovery,
+    cardSummary, historyRows, latestExpanded, pastCollapsed, historyLabels, trendSegments, trendInsufficient}));
 })().catch((error) => {
   process.stdout.write(JSON.stringify({harnessError: String(error && error.stack ? error.stack : error)}));
   process.exitCode = 2;
@@ -3495,6 +4834,61 @@ for result_key, test_name in (
         test_name,
         isinstance(node_ui_result, dict) and node_ui_result.get(result_key) is True,
         node_ui_detail,
+    )
+
+for result_key, test_name in (
+    ("historyRows", "작업 히스토리는 workItems 4개 행을 모두 렌더"),
+    ("latestExpanded", "최신 작업은 펼친 행과 aria-current=true 로 표시"),
+    ("pastCollapsed", "과거 작업 3개는 details 안에 접어서 표시"),
+    ("historyLabels", "작업 행은 결과 4값·pipeline·진행률·Step·도구 수를 표시"),
+    ("trendSegments", "진행률 SVG 는 workId·null·dashboard 경계마다 선을 분리"),
+    ("trendInsufficient", "유효 진행률 점이 2개 미만이면 추이 기록 부족 표시"),
+    ("cardSummary", "카드는 workSummary 요약을 표시하고 None 이면 생략"),
+):
+    check(
+        test_name,
+        isinstance(node_ui_result, dict) and node_ui_result.get(result_key) is True,
+        node_ui_detail,
+    )
+
+
+def has_history_ui_tokens(html):
+    dark_marker = "@media (prefers-color-scheme: dark)"
+    if dark_marker not in html:
+        return False
+    light_css, dark_css = html.split(dark_marker, 1)
+    tokens = (
+        "--chart-line",
+        "--chart-observed",
+        "--chart-grid",
+        "--work-completed",
+        "--work-running",
+        "--work-answered",
+        "--work-interrupted",
+    )
+    return all(
+        re.search(rf"{re.escape(token)}\s*:", light_css)
+        and re.search(rf"{re.escape(token)}\s*:", dark_css)
+        for token in tokens
+    )
+
+
+check(
+    "작업·차트 신규 토큰은 라이트·다크에 모두 있고 script 1개·innerHTML 데이터 대입 없음",
+    has_history_ui_tokens(dashboard.PAGE_HTML)
+    and len(re.findall(r"<script>", dashboard.PAGE_HTML)) == 1
+    and avoids_data_inner_html(dashboard.PAGE_HTML),
+    "missing exact H7 tokens, multiple scripts, or non-empty innerHTML assignment",
+)
+
+
+print("H8 serve 테스트 격리")
+with tempfile.TemporaryDirectory(prefix="orca dashboard h8 fixture ") as temporary_directory:
+    isolated_environment = fixture_environment(temporary_directory)
+    expect_equal(
+        "fixture_environment 는 모든 공용 serve 테스트에 임시 history 디렉토리 제공",
+        lambda: isolated_environment.get("ORCA_DASHBOARD_HISTORY_DIR"),
+        str(Path(temporary_directory) / "history"),
     )
 
 
