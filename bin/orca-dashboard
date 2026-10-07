@@ -63,7 +63,6 @@ COMPLETION_RE = re.compile(r"머지했|merged=true|완료했습니다|모두 끝
 ERROR_LINE_RE = re.compile(
     r"BUILD FAILED|(?<![A-Za-z0-9_])FAILED(?![A-Za-z0-9_])|Traceback|Error:|exit code [1-9]"
 )
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n")
 REQUEST_RE = re.compile(
     r"지시하시면|알려\s?주세요|할까요|하시겠어요|정해\s?주세요|선택해\s?주세요"
     r"|승인해\s?주세요|확인해\s?주세요|\?\s*$"
@@ -102,9 +101,17 @@ COMMAND_NAME_RE = re.compile(r"<command-name>/([^<\s]+)</command-name>")
 COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 REQUEST_COMMAND_PREFIX = "private-"  # 등록 파이프라인 슬래시 호출만 요청 (parse_transcript 는 pipelines 를 모른다)
 RUN_DIRECTORY_RE = re.compile(r"runs/([a-z][a-z0-9-]*)/(\d{8}-[a-z0-9-]+)")
-HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-SHORT_FOLLOWUP_RE = re.compile(r"^(승인|머지|푸시|커밋|진행|계속|이어서|네|응|ㅇㅇ|ok|yes|좋아|고고|\d{1,2})", re.I)
-SHORT_FOLLOWUP_MAX_CHARS = 20
+HEREDOC_START_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+SHORT_FOLLOWUP_RE = re.compile(
+    r"(?:승인|머지|푸시|커밋|진행|계속|이어서|좋아|고고)(?:해|해줘|해 줘|해요|하자|해주세요)?"
+    r"|네|응|ㅇㅇ|ok|yes|넵|예|\d{1,2}번?",
+    re.I,
+)
+SHORT_FOLLOWUP_TRAILING_CHARS = " .!?~"
+WORK_CONTINUATION_RE = re.compile(r"다음|이후|next|이어서", re.I)
+STEP_SCOPE_RE = re.compile(r"Step\s*\d|단계", re.I)
+SHELL_REDIRECTION_RE = re.compile(r"^(?:\d+|&)?(?:>>|>&|>\||<<<|<<-|<<|<>|<&|>|<)(.*)$", re.S)
+SHELL_UNPARSEABLE_MARKERS = ("$(", "`", "<(", ">(")
 SHELL_SEPARATOR_CHARS = ";&|\n"
 SHELL_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 SHELL_VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
@@ -806,18 +813,20 @@ def _user_request_text(record: dict) -> str | None:
 
 
 def strip_heredocs(command: str) -> str:
-    """H10 — heredoc 본문(구분자 다음 줄 ~ 구분자만 있는 줄)을 제거한 명령."""
+    """H10·H23 — heredoc 본문(구분자 다음 줄 ~ 구분자만 있는 줄)을 제거한 명령.
+
+    한 줄에 heredoc 이 여러 개 선언되면 선언 순서대로 각 구분자 줄까지의 본문을 모두 제거한다.
+    here-string(`<<<`)은 heredoc 이 아니다. 닫히지 않은 heredoc 은 끝까지 본문으로 본다(보수적).
+    """
     kept: list[str] = []
-    terminator: str | None = None
+    pending: list[str] = []
     for line in command.split("\n"):
-        if terminator is not None:
-            if line.strip() == terminator:
-                terminator = None
+        if pending:
+            if line.strip() == pending[0]:
+                pending.pop(0)
             continue
         kept.append(line)
-        match = HEREDOC_START_RE.search(line)
-        if match:
-            terminator = match.group(2)
+        pending = [match.group(2) for match in HEREDOC_START_RE.finditer(line)]
     return "\n".join(kept)
 
 
@@ -851,27 +860,54 @@ def _expand_variables(word: str, variables: dict[str, str]) -> str:
     return SHELL_VARIABLE_RE.sub(lambda match: variables.get(match.group(1) or match.group(2), match.group(0)), word)
 
 
+def _without_redirections(tokens: list[str]) -> list[str]:
+    """H22 — 리다이렉션 연산자(`>`·`>>`·`<`·`2>`·`&>`·`>&`·`<<` 등, 숫자 접두 포함)와 그 피연산자를 뺀 토큰.
+
+    붙어 쓴 형태(`2>file`·`>file`)는 그 토큰만, 분리된 형태(`2> file`)는 다음 토큰까지 제거한다.
+    """
+    kept: list[str] = []
+    skip_operand = False
+    for token in tokens:
+        if skip_operand:
+            skip_operand = False
+            continue
+        redirection = SHELL_REDIRECTION_RE.match(token)
+        if redirection is None:
+            kept.append(token)
+        elif not redirection.group(1):
+            skip_operand = True
+    return kept
+
+
 def mkdir_targets(command: str) -> list[str]:
-    """H14 — heredoc 을 뺀 명령에서 `mkdir` 의 대상 인자(옵션 제외, 변수 치환 후). 파싱 실패는 [] (보수적)."""
+    """H14·H22 — heredoc 을 뺀 명령에서 `mkdir` 의 대상 인자(옵션·리다이렉션 제외, 변수 치환 후).
+
+    파싱 실패·명령 치환(`$(…)`·백틱)·프로세스 치환이 있는 mkdir·치환되지 않은 변수는 신호 없음 (보수적).
+    """
     try:
         commands = _shell_commands(strip_heredocs(command))
     except ValueError:
         return []
     variables: dict[str, str] = {}
     targets: list[str] = []
-    for tokens in commands:
+    for raw_tokens in commands:
+        tokens = _without_redirections(raw_tokens)
         index = 0
         while index < len(tokens) and (assignment := SHELL_ASSIGNMENT_RE.match(tokens[index])):
             variables[assignment.group(1)] = _expand_variables(assignment.group(2), variables)
             index += 1
         if index >= len(tokens) or os.path.basename(tokens[index]) != "mkdir":
             continue
+        if any(marker in token for token in raw_tokens for marker in SHELL_UNPARSEABLE_MARKERS):
+            continue
         options_done = False
         for argument in tokens[index + 1:]:
             if not options_done and argument == "--":
                 options_done = True
             elif options_done or not argument.startswith("-"):
-                targets.append(_expand_variables(argument, variables))
+                target = _expand_variables(argument, variables)
+                if "$" not in target:
+                    targets.append(target)
     return targets
 
 
@@ -1038,9 +1074,24 @@ def parse_transcript(lines: Iterable[str]) -> dict:
 
 
 def is_short_followup(text: str) -> bool:
-    """H12 — '승인'·'머지해'·'1' 같은 후속 표현으로 시작하는 20자 이하 요청. 길이만으로는 후속이 아니다."""
-    normalized = _normalized(text)
-    return len(normalized) <= SHORT_FOLLOWUP_MAX_CHARS and SHORT_FOLLOWUP_RE.match(normalized) is not None
+    """H19 — 승인·재개·선택 답변 표현과 문자열 **전체**가 일치하는 요청 (끝 문장부호 `.!?~` 무시).
+
+    접두사만 같은 독립 요청(`네트워크 고쳐줘`·`응답 속도 개선`·`1번 API 수정해`)은 후속이 아니다.
+    """
+    normalized = _normalized(text).rstrip(SHORT_FOLLOWUP_TRAILING_CHARS)
+    return SHORT_FOLLOWUP_RE.fullmatch(normalized) is not None
+
+
+def is_work_completion(text: str) -> bool:
+    """H20 — 작업 전체 완료 보고. 문장 분리는 R9(`_current_steps`)와 같은 SENTENCE_SPLIT_RE.
+
+    COMPLETION_RE 가 맞는 문장 중 Step·단계 언급이 없는 문장이 있고, 같은 텍스트에 다음 진행을 예고하는
+    문장(`다음`·`이후`·`next`·`이어서`)이 없을 때만 완료다. `Step 1을 완료했습니다. 다음은 Step 2입니다.` = 완료 아님.
+    """
+    sentences = [sentence for sentence in SENTENCE_SPLIT_RE.split(text) if sentence.strip()]
+    if any(WORK_CONTINUATION_RE.search(sentence) for sentence in sentences):
+        return False
+    return any(COMPLETION_RE.search(sentence) and not STEP_SCOPE_RE.search(sentence) for sentence in sentences)
 
 
 def _title_line(text: str | None) -> str:
@@ -1209,7 +1260,7 @@ class _WorkSplitter:
         work = self._current
         if work is None or not text.strip():
             return
-        if COMPLETION_RE.search(text):
+        if is_work_completion(text):
             work["interrupted"] = False
             if not work["completed"]:
                 work["completed"], work["completedAt"] = True, at
@@ -1234,6 +1285,7 @@ class _WorkSplitter:
                 "title": work["title"],
                 "startedAt": work["startedAt"],
                 "endedAt": work["endedAt"],
+                "completedAt": work["completedAt"],
                 "requestCount": work["requestCount"],
                 "pipeline": work["pipeline"],
                 "runId": work["runId"],
@@ -1292,8 +1344,11 @@ def progress_series(work_items: list[dict], observed: list[dict], pipelines: dic
             if step["at"] is not None:
                 progress = _work_progress("in_progress", item["pipeline"], step["step"], pipelines)
                 points.append(_series_point(step["at"], progress, "transcript", item["id"]))
-        if item["result"] == "completed" and item["endedAt"] is not None:
-            points.append(_series_point(item["endedAt"], {"percent": 100, "basis": "완료 보고"}, "transcript", item["id"]))
+        # H21 — 완료 100% 점은 완료 보고 시각(completedAt) 고정. 후속 응답(endedAt)으로 옮기지 않는다
+        if item["result"] == "completed" and item.get("completedAt") is not None:
+            points.append(
+                _series_point(item["completedAt"], {"percent": 100, "basis": "완료 보고"}, "transcript", item["id"])
+            )
     for point in observed:
         if point.get("percent") is not None:
             points.append(_series_point(point["at"], point, "dashboard", None))
@@ -1721,6 +1776,15 @@ def history_path(env: Mapping[str, str]) -> str:
     return os.path.join(directory, HISTORY_FILE_NAME)
 
 
+class _UnlockError(OSError):
+    """공유 잠금 해제 실패 — 읽은 줄(lines)은 유효하다."""
+
+    def __init__(self, lines: list[str], cause: OSError):
+        super().__init__(str(cause))
+        self.lines = lines
+        self.cause = cause
+
+
 class HistoryStore:
     """관측 히스토리 JSONL — 값이 바뀐 점만 append, 세션당 HISTORY_POINTS_PER_SESSION 개 메모리 사본.
 
@@ -1737,22 +1801,49 @@ class HistoryStore:
         self._load_warnings: list[str] = []
         self._record_warnings: list[str] = []
 
+    @property
+    def path(self) -> str:
+        return self._path
+
     def load(self) -> list[str]:
+        """공유 잠금(LOCK_SH) 아래 읽기. 파일 없음 → [], 잠금·열기·읽기·해제의 모든 OSError → 읽기 실패 경고 (H18).
+
+        잠금을 못 잡으면 읽지 않는다(압축 중 파일을 섞어 읽지 않게). 해제 실패는 이미 읽은 내용을 반영하고 경고만 남긴다.
+        """
+        lines: list[str] | None = None
+        warnings: list[str] = []
         try:
-            with open(self._path, encoding="utf-8", errors="replace") as handle:
-                lines = handle.read().splitlines()
+            lines = self._read_shared()
         except FileNotFoundError:
-            warnings: list[str] = []
+            lines = None
+        except _UnlockError as error:
+            lines = error.lines
+            warnings = [f"history 읽기 실패 {self._path}: {error.cause}"]
         except OSError as error:
             warnings = [f"history 읽기 실패 {self._path}: {error}"]
-        else:
-            warnings = []
-            with self._lock:
+        with self._lock:
+            if lines is not None:
                 self._points = parse_history(lines)
                 self._line_count = len(lines)
-        with self._lock:
             self._load_warnings = warnings
         return list(warnings)
+
+    def _read_shared(self) -> list[str]:
+        os.stat(self._path)  # 파일 없음 = FileNotFoundError(경고 없음) — 잠금 파일을 만들기 전에 판정
+        with open(self._path + ".lock", "a", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            try:
+                with open(self._path, encoding="utf-8", errors="replace") as handle:
+                    lines = handle.read().splitlines()
+            except BaseException:
+                with suppress(OSError):
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                raise
+            try:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            except OSError as error:
+                raise _UnlockError(lines, error) from error
+        return lines
 
     def record(self, snapshot: dict, now_ms: int) -> list[str]:
         with self._lock:
@@ -1772,31 +1863,40 @@ class HistoryStore:
             return [*self._load_warnings, *self._record_warnings]
 
     def _write(self, changes: list[dict]) -> list[str]:
-        """잠금 파일 flock 아래 append → 메모리 반영 → (임계값 초과 시) 압축. 실패는 경고 목록."""
+        """잠금 파일 flock 아래 append → 메모리 반영 → (임계값 초과 시) 압축. 실패는 경고 목록.
+
+        H18 — 디렉토리 생성·잠금 파일 열기·flock 획득·해제·닫기의 모든 OSError 는 경고로 돌려주고 올리지 않는다.
+        획득 실패면 쓰지 않는다(메모리 미반영 → 다음 주기 재시도). 해제 실패는 이미 append 한 점을 유지하고 경고만 더한다.
+        """
         directory = os.path.dirname(self._path)
         try:
             if directory:
                 os.makedirs(directory, exist_ok=True)
-            lock = open(self._path + ".lock", "a", encoding="utf-8")
+            with open(self._path + ".lock", "a", encoding="utf-8") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                warnings = self._write_locked(changes, directory or ".")
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                except OSError as error:
+                    warnings.append(f"history 기록 실패 {self._path}: {error}")
+                return warnings
         except OSError as error:
             return [f"history 기록 실패 {self._path}: {error}"]
-        with lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                try:
-                    self._append(changes)
-                except OSError as error:
-                    return [f"history 기록 실패 {self._path}: {error}"]
-                self._remember(changes)
-                if self._line_count <= HISTORY_COMPACT_LINES:
-                    return []
-                try:
-                    self._compact(directory or ".")
-                except OSError as error:
-                    return [f"history 기록 실패 {self._path}: 압축 실패 — {error}"]
-                return []
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _write_locked(self, changes: list[dict], directory: str) -> list[str]:
+        """호출자가 LOCK_EX 를 잡은 상태. append 실패·압축 실패는 경고 목록 (예외 없음)."""
+        try:
+            self._append(changes)
+        except OSError as error:
+            return [f"history 기록 실패 {self._path}: {error}"]
+        self._remember(changes)
+        if self._line_count <= HISTORY_COMPACT_LINES:
+            return []
+        try:
+            self._compact(directory)
+        except OSError as error:
+            return [f"history 기록 실패 {self._path}: 압축 실패 — {error}"]
+        return []
 
     def _append(self, changes: list[dict]) -> None:
         """끝이 개행이 아니면(잘린 줄) 먼저 개행 후 append. 호출자가 flock 을 잡는다."""
@@ -1872,14 +1972,24 @@ class SnapshotStore:
                 self._snapshot = {**self._snapshot, "error": f"{type(error).__name__}: {error}"}
             return
         if self._history is not None:
-            self._history.record(snapshot, now_ms)
-            # warnings() = 시작 시 읽기 실패(지속) + 이번 기록 실패 — record 반환값과 같은 경고를 포함한다
-            snapshot["warnings"] = [*snapshot["warnings"], *self._history.warnings()]
+            snapshot["warnings"] = [*snapshot["warnings"], *self._record_history(snapshot, now_ms)]
         with self._lock:
             self._snapshot = snapshot
             self._prompts = prompts
             self._catalog = catalog
             self._last_success_at = now_ms
+
+    def _record_history(self, snapshot: dict, now_ms: int) -> list[str]:
+        """H18 최후 방어 — record 가 어떤 예외를 내도 snapshot 갱신·다음 주기 수집을 막지 않고 경고로 바꾼다.
+
+        정상 경로의 경고 = warnings() (시작 시 읽기 실패(지속) + 이번 기록 실패, record 반환값 포함).
+        """
+        history = self._history
+        try:
+            history.record(snapshot, now_ms)
+            return history.warnings()
+        except Exception as error:  # noqa: BLE001 — 기록 실패가 수집 스레드·서버 기동을 죽이지 않는다
+            return [f"history 기록 실패 {history.path}: {type(error).__name__}: {error}"]
 
     def _fill_work_summaries(self, sessions: list[dict], prompts: dict, catalog: dict) -> None:
         """transcript 를 연결할 수 있는 세션만 workSummary 계산 (매칭·분할 모두 파일 캐시). 실패 세션은 None 유지."""
