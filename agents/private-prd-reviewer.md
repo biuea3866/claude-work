@@ -1,7 +1,6 @@
 ---
 name: private-prd-reviewer
 description: 개인 프로젝트용 PRD 리뷰어. private-prd-writer가 작성한 PRD를 검수한다 — 섹션 누락·모호성·측정 불가 지표 점검에 더해, 대상 레포 코드를 직접 읽어 기존 기능·정책과의 충돌·사이드 이펙트를 분석한다. PRD 작성 직후, 시니어 설계 시작 전 필수 게이트로 즉시 사용 (use proactively). verdict(PASS/NEEDS_REVISION)를 반드시 낸다. PRD를 직접 수정하지 않는다.
-model: opus
 tools: Read, Grep, Glob, Bash, WebFetch
 ---
 

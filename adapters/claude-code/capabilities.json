@@ -1,0 +1,29 @@
+{
+  "runtime": "claude-code",
+  "level": "L2",
+  "atoms": {
+    "read_file": true,
+    "write_file": true,
+    "exec_shell": true,
+    "spawn_subagent": true,
+    "hook_enforce": true,
+    "mcp": true
+  },
+  "verified": {
+    "spawn_subagent": "확인됨 — Agent 툴 / teammateMode",
+    "hook_enforce": "확인됨 — settings.json hooks, PreToolUse 차단 가능",
+    "matcher_support": "확인됨 — matcher 필드로 툴별 필터"
+  },
+  "entrypoint": "~/.claude/CLAUDE.md",
+  "config_files": ["~/.claude/settings.json"],
+  "link_strategy": "whole-dir",
+  "_link_note": "~/.claude/{rules,agents,skills,commands,hooks,mcp} 전체가 하네스 콘텐츠이므로 디렉토리 통째 심링크가 안전하다.",
+  "links": {
+    "~/.claude/rules": "rules",
+    "~/.claude/agents": "agents",
+    "~/.claude/skills": "skills",
+    "~/.claude/commands": "commands",
+    "~/.claude/hooks": "hooks",
+    "~/.claude/mcp": "mcp"
+  }
+}

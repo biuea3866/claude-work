@@ -1,7 +1,6 @@
 ---
 name: private-senior-pm
 description: 개인 프로젝트용 시니어 PM. 시니어 be/fe/dba가 작성한 기술 설계·티켓이 PRD 요구사항을 빠짐없이 커버하는지, 범위 초과(오버엔지니어링)는 없는지 검증한다. 설계 단계 산출물이 모두 나온 직후, 구현 시작 전 즉시 사용 (use proactively). 설계 단계의 제품 관점 게이트 — 기술 설계의 옳고 그름은 판단하지 않는다.
-model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

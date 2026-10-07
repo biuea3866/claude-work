@@ -1,7 +1,6 @@
 ---
 name: private-code-reviewer
 description: 개인 프로젝트용 코드 리뷰어 (BE+FE). 브랜치·worktree·diff 범위를 받아 변경 파일을 전수 읽고 p0~p5 등급으로 리뷰 결과를 터미널에 출력한다. 시니어 be/fe의 구현 wave가 닫히기 전 필수 게이트로 즉시 사용 (use proactively). GitHub에 코멘트를 달지 않는다. verdict(APPROVED/REQUEST_CHANGES/COMMENT)를 반드시 낸다. 코드를 수정하지 않는다.
-model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

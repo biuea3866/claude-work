@@ -1,3 +1,15 @@
+---
+id: private-kafka-convention
+title: [개인] Kafka 컨벤션 (로컬 docker compose / JSON 스키마)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/docker-compose*.yml"
+  - "**/docker-compose*.yaml"
+  - "**/kafka/**"
+---
+
 # [개인] Kafka 컨벤션 (로컬 docker compose / JSON 스키마)
 
 개인 프로젝트용 Kafka 규칙. `private-kafka-implementer`가 작성 기준으로, `private-infra-reviewer`가 검수 기준으로 공통 참조한다 (SSOT). 환경 전제: 로컬 docker compose 단일 브로커, Schema Registry 없음(JSON).

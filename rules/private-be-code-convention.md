@@ -1,3 +1,14 @@
+---
+id: private-be-code-convention
+title: [개인] BE 코드 컨벤션 (Kotlin / Spring Boot)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/*.kt"
+  - "**/*.kts"
+---
+
 # [개인] BE 코드 컨벤션 (Kotlin / Spring Boot)
 
 개인 프로젝트용 BE 컨벤션 — Hexagonal Architecture + Rich Domain Model. `private-be-implementer`, `private-senior-be`, `private-code-reviewer`가 공통 참조한다 (SSOT). 회사 `be-code-convention.md`의 자급자족 복사본으로, 회사 rules 변경에 영향받지 않는다.
@@ -22,6 +33,7 @@
 | no-transactional-in-repository | `@Transactional` in `*Repository*.kt` | UseCase에서만 선언 |
 | no-infra-in-domain | `import *.infrastructure.*` in `domain/**` | Domain interface 사용 |
 | no-infra-in-application | `import *.infrastructure.*` in `application/**` | Domain interface 사용 |
+| no-crosscontext-raw-read | 도메인 패키지 교차 참조 금지를 피하려고 **다른 컨텍스트 소유 테이블을 로우 쿼리(JdbcTemplate·네이티브 SQL)로 직접 읽는** read model — matching이 posting 소유 `job_postings`를 SQL로 조회하는 식. import만 없앴을 뿐 스키마 결합은 그대로라 규칙을 우회한 것 | 크로스 컨텍스트 조회·조합은 **application 레이어**에서 — UseCase가 소유 컨텍스트 DomainService를 호출해 도메인 객체로 받고, application 매퍼가 소비 컨텍스트의 입력 값 객체로 변환 ([크로스 컨텍스트 조합](#크로스-컨텍스트-조합-application-레이어-책임)) |
 | no-external-state-check | `entity.status == X` (호출부 상태 비교) | Entity 행위 메서드(`entity.rent()`) / 질의 메서드(`entity.isRentable()`) |
 | no-getter-chain-behavior | 래퍼/집계 객체의 내부를 꺼내 행위·검증 (`wrapper.inner.doX(..)`, `wrapper.inner.value` 비교) | 래퍼 자신의 캡슐화 메서드에 위임 (`wrapper.doX(..)`) |
 | no-expose-value-for-external-logic | 객체 내부 값을 꺼내 외부 함수·검증에 전달 (`validate(obj.a, obj.b)`) | 그 판단 로직을 객체의 캡슐화 메서드로 (`obj.validate(..)`) |
@@ -30,6 +42,8 @@
 | no-cross-context-reverse-dep | 공용 컨텍스트(payment·notification 등)가 주문/업무 컨텍스트(booking·goods·…) DomainService/Repository 역참조 — `OrderConfirmationGateway`류 `when(orderType)` 동기 디스패치 허브 | 공용 컨텍스트가 이벤트 발행 → 각 주문 컨텍스트가 자기 EventWorker로 확정 ([private-be-architecture-rule](./private-be-architecture-rule.md) "공용 컨텍스트 역참조 금지") |
 | no-technical-item-name | 사용자 노출 문자열(PG 주문명 `itemName` 등)에 `"TYPE #id"`(`BOOKING #42`·`"$orderType #$orderId"`) 같은 기술 식별자 | 도메인의 사람이 읽는 이름(모집 제목·상품명·이벤트명 등). 이름은 그 주문 컨텍스트가 **자기 데이터로** 구성 (itemName 때문에 다른 컨텍스트 역참조 금지) |
 | no-over-abstract-name | 도메인 의미가 없는 과도한 추상 네이밍 — 클래스·변수·메서드·테이블·컬럼에 `applications`·`event`·`suspend`·`data`·`info`·`item`·`type`·`status`·`process`·`handle` 같은 일반 명사 단독 사용 | 도메인 개념을 드러내는 이름 — `rentalApplications`/`membershipSuspension`/`RentalReturnedEvent`, 테이블 `rental_applications`, 컬럼 `suspended_reason`. "무엇의" 를 붙여 구체화 ([도메인 기반 네이밍](#도메인-기반-네이밍-과도한-추상화-금지)) |
+| no-bean-config-wiring | 도메인·애플리케이션 서비스(DomainService·UseCase)를 별도 `@Configuration` + `@Bean` 클래스(`~DomainServiceConfig.kt`·`~UseCaseConfig.kt`)로 수동 배선 | Spring 컴포넌트 스캔 — 클래스에 `@Service`(DomainService·UseCase)·`@Component`(그 외 빈) 직접 부착. 배선 전용 Config 클래스는 만들지 않는다 ([DI: 컴포넌트 스캔](#di--컴포넌트-스캔-configbean-배선-금지)) |
+| no-business-flow-in-infra | infrastructure 어댑터(`~RepositoryImpl`·`~GatewayImpl`)에 **비즈니스 흐름·다단계 쓰기 오케스트레이션·트랜잭션/원자성 관리**를 작성 — 예: 애그리게이트 자식 컬렉션을 수동 `delete-all + save-all` 시퀀스로 재작성하고 "원자성은 호출부 트랜잭션이 보장"을 주석/계약으로 떠넘김, 저장 중 조건 분기·계산으로 무엇을 쓸지 결정 | 애그리게이트는 **한 단위로 영속화** — JPA `@OneToMany(cascade, orphanRemoval)`로 매핑해 `repository.save(aggregate)` 한 번에 자식까지 반영. Infra는 **도메인↔영속 엔티티 매핑 + 단일 위임**만. 흐름·트랜잭션 경계·순서·조건은 application UseCase(`@Transactional`)·domain(DomainService/Entity)이 소유 ([Infra는 얇은 어댑터](#infrastructure는-얇은-어댑터-비즈니스-흐름-금지)) |
 
 ## 레이어 책임
 
@@ -37,10 +51,12 @@
 |---|---|---|---|
 | **presentation** | 라우팅(Controller), 인증, Request→Command 변환, UseCase 호출, **Kafka Consumer/EventListener** (외부 이벤트 진입점) | application | 비즈니스 로직 |
 | **application** | UseCase 단위 오케스트레이션 | domain | Repository/Gateway/DomainEventPublisher 직접 참조, 비즈니스 로직 |
-| **domain** | 순수 비즈니스 로직 (Rich Domain Model), Repository·Gateway·DomainEventPublisher **interface 정의** | (없음) | Infrastructure 참조, 다른 도메인 패키지 import |
+| **domain** | 순수 비즈니스 로직 (Rich Domain Model), Repository·Gateway·DomainEventPublisher **interface 정의** | (없음, 단 Spring stereotype 애노테이션은 예외) | Infrastructure 참조, 다른 도메인 패키지 import |
 | **infrastructure** | Domain interface 구현체 (Repository/Gateway/DomainEventPublisher), 기술 어댑터 (DB·Kafka·외부 API) | domain | — |
 
 > **OutputPort 패턴은 사용하지 않는다.** Domain layer에 Repository / Gateway / DomainEventPublisher interface를 직접 정의하고, infrastructure가 구현한다.
+
+> **DI는 컴포넌트 스캔으로 한다 (no-bean-config-wiring).** DomainService·UseCase에 `@Service`를 직접 부착해 Spring이 스캔·주입하게 하고, 배선 전용 `@Configuration`+`@Bean` 클래스는 만들지 않는다. 이 결정으로 **domain의 "아무것도 import하지 않는다(순수)" 규칙은 Spring stereotype 애노테이션(`@Service`/`@Component`) 한 가지만 예외로 완화**한다 — 그 외 프레임워크(JPA·Spring Data·Web·Kafka·infrastructure) import는 domain에서 여전히 금지다. Entity·Value Object·Repository/Gateway interface에는 애노테이션을 붙이지 않는다(빈이 아니다). 상세는 [DI: 컴포넌트 스캔](#di--컴포넌트-스캔-configbean-배선-금지).
 
 ### 레이어 의존 방향
 
@@ -48,8 +64,92 @@
 presentation → application → domain ← infrastructure
 ```
 
-- Domain은 어느 것도 import하지 않는다 (순수)
+- Domain은 어느 것도 import하지 않는다 (순수) — **예외: Spring stereotype 애노테이션(`@Service`/`@Component`)만 허용** (아래 "DI: 컴포넌트 스캔")
 - 도메인 패키지 간 참조 금지 (`domain.rental`에서 `domain.product` import 불가, `domain.common`만 허용)
+
+### DI: 컴포넌트 스캔 (`@Configuration`/`@Bean` 배선 금지)
+
+빈 배선은 **Spring 컴포넌트 스캔**으로 한다. DomainService·UseCase에 애노테이션을 직접 붙여 스캔·주입되게 하고, **배선 전용 `@Configuration`+`@Bean` 클래스(`~DomainServiceConfig.kt`·`~UseCaseConfig.kt` 등)는 만들지 않는다** (no-bean-config-wiring). 서비스마다 Config 파일을 만드는 보일러플레이트를 없애는 것이 목적이다.
+
+| 대상 | 애노테이션 | 근거 |
+|---|---|---|
+| DomainService | `@Service` | 도메인 서비스 빈 |
+| UseCase | `@Service` | 애플리케이션 서비스 빈 |
+| GatewayImpl·RepositoryImpl·DomainEventPublisher 구현·기타 어댑터 (infrastructure) | `@Component`(또는 `@Repository`) | 기술 어댑터 빈 |
+| Entity·Value Object·Command/Request/Response DTO | (없음) | 빈이 아니다 — 매번 생성되는 값 |
+| Repository·Gateway·DomainEventPublisher **interface** | (없음) | 구현체가 빈, interface는 아님 |
+
+- **domain 순수성 완화의 범위**: 이 결정으로 domain은 `org.springframework.stereotype.Service`(및 `@Component`) **한 종류만** import를 허용한다. JPA(`@Entity`·`@Table`)·Spring Data·Web·Kafka·`org.springframework.context.annotation.*`(`@Configuration`/`@Bean`)·infrastructure 타입 import는 domain에서 **여전히 금지**다. 생성자 주입은 그대로 유지한다 (`@Autowired` 필드 주입 금지).
+- **`@Configuration`이 여전히 필요한 경우**: 프레임워크/서드파티 빈(우리가 애노테이트할 수 없는 클래스 — `ObjectMapper`·`RestClient`·`KafkaTemplate` 커스터마이징·`WebClient` 등), 조건부/프로퍼티 바인딩 설정은 `@Configuration`을 쓴다. 금지 대상은 **우리 소유 서비스(DomainService·UseCase)를 `@Bean`으로 수동 배선하는 Config**다.
+- **DI 애노테이션으로 기능 토글 금지**: `@ConditionalOnProperty`/`@Profile`은 여전히 금지(no-conditional-on-property) — 컴포넌트 스캔은 무조건 등록이고, on/off는 런타임 플래그로 분기한다.
+
+### infrastructure는 얇은 어댑터 — 비즈니스 흐름 금지
+
+infrastructure 어댑터(`~RepositoryImpl`·`~GatewayImpl`)의 책임은 **도메인 객체 ↔ 영속/외부 엔티티 매핑 + 단일 위임**뿐이다. 무엇을 어떤 순서로 쓸지·언제 자식을 지우고 다시 넣을지·트랜잭션을 어떻게 원자적으로 묶을지 같은 **흐름 제어(오케스트레이션)는 비즈니스 로직**이며 application(UseCase)·domain(DomainService/Entity)이 소유한다 (no-business-flow-in-infra).
+
+- **애그리게이트는 한 단위로 영속화한다.** 루트와 자식 컬렉션을 JPA `@OneToMany(cascade = [CascadeType.ALL], orphanRemoval = true)`(+ 자식 `@ManyToOne`)로 매핑하면, `repository.save(root)` 한 번이 자식 삽입·수정·삭제를 한 트랜잭션·한 단위로 반영한다. RepositoryImpl은 도메인 애그리게이트 → JPA 루트 엔티티로 변환해 `jpaRepository.save()` 한 번만 호출한다.
+- **금지 신호**: RepositoryImpl `save()` 안의 ① 부모 저장 후 자식 `findAll → deleteAll → saveAll` 수동 재작성 시퀀스, ② "원자성은 호출부 트랜잭션이 보장한다"는 주석/계약(원자성은 매핑 구조와 UseCase `@Transactional`이 보장해야지 infra 주석이 요구할 일이 아니다), ③ 저장 도중 `if/when`으로 무엇을 쓸지 결정하는 분기·계산.
+- **트랜잭션 경계는 UseCase `@Transactional`** 하나로 잡는다. infra가 자체적으로 여러 쓰기를 묶으려 하지 않는다.
+- 조회(read) 쪽도 동일 — 여러 자식 테이블을 조합해 애그리게이트를 복원하는 매핑은 infra의 정당한 일이지만, "무엇을 조회할지"의 정책(필터·판정)은 domain/application이 정한 조건을 받아 수행할 뿐 infra가 비즈니스 규칙을 새로 만들지 않는다.
+
+```kotlin
+// ❌ BAD — RepositoryImpl.save()가 자식 컬렉션을 수동 재작성 + 원자성을 주석으로 떠넘김 (no-business-flow-in-infra)
+override fun save(result: JobPostingMatchResult): JobPostingMatchResult {
+    val saved = matchResultJpaRepository.save(rootEntity(result))
+    // "원자성 계약: 호출부 트랜잭션 안에서 실행돼야 아래 삭제·삽입이 한 단위로 묶인다" ← infra가 요구할 일이 아니다
+    matchedGroupJpaRepository.deleteAll(matchedGroupJpaRepository.findAllByMatchResultId(saved.id!!)) // 다단계 오케스트레이션
+    matchedGroupJpaRepository.saveAll(result.matchedGroupIds().map { childEntity(saved.id, it) })
+    workArrangementJpaRepository.deleteAll(workArrangementJpaRepository.findAllByJobPostingId(result.jobPostingId))
+    workArrangementJpaRepository.saveAll(result.workArrangementEvidences().map { childEntity(result.jobPostingId, it) })
+    return requireNotNull(findBy(result.jobPostingId))
+}
+
+// ✅ GOOD — 애그리게이트를 JPA cascade로 한 단위 저장. 자식 동기화는 orphanRemoval이 담당
+@Entity
+class JobPostingMatchResultJpaEntity(
+    @Id @GeneratedValue val id: Long?,
+    val jobPostingId: Long,
+    // ...
+    @OneToMany(mappedBy = "matchResult", cascade = [CascadeType.ALL], orphanRemoval = true)
+    val matchedGroups: MutableList<JobPostingMatchedKeywordGroupJpaEntity>,
+    @OneToMany(mappedBy = "matchResult", cascade = [CascadeType.ALL], orphanRemoval = true)
+    val workArrangements: MutableList<JobPostingWorkArrangementJpaEntity>,
+)
+
+override fun save(result: JobPostingMatchResult): JobPostingMatchResult =
+    matchResultJpaRepository.save(JobPostingMatchResultJpaEntity.from(result)).toDomain()
+// 트랜잭션은 UseCase @Transactional 하나. 자식 delete/insert는 orphanRemoval이 한 단위로 처리.
+```
+
+### 크로스 컨텍스트 조합 (application 레이어 책임)
+
+한 도메인이 다른 도메인의 데이터를 필요로 할 때, **두 컨텍스트를 아는 유일한 레이어는 application**이다. 소비 도메인이 직접 남의 데이터를 가져오지 않는다.
+
+- **금지 (no-crosscontext-raw-read)**: 교차 참조 금지를 피하려고 소비 도메인의 infrastructure에서 다른 컨텍스트 소유 테이블을 **로우 쿼리(JdbcTemplate·네이티브 SQL)로 직접 읽는** read model. `import`만 사라질 뿐 **스키마 결합은 그대로**라 규칙의 목적(컨텍스트 격리)을 어긴다. 오히려 컴파일 가드가 없어져 스키마 드리프트가 런타임에만 터진다.
+- **올바른 흐름**: application UseCase가 ① **소유 컨텍스트의 DomainService**를 호출해 그 도메인 객체(또는 Response)로 받고 → ② **application 레이어의 매퍼**가 소비 컨텍스트의 입력 값 객체(도메인 값 객체/Command)로 변환 → ③ **소비 컨텍스트 DomainService**에 그 값 객체를 넘긴다. 소유 컨텍스트는 자기 테이블만 자기 Repository(JPA/QueryDSL)로 읽는다.
+- **소비 도메인 서비스 시그니처에 소유 도메인 타입을 두지 않는다** — 두면 domain→domain 참조다. 소비 도메인은 자기 값 객체(`EvaluationTarget` 등)만 입력받아야 순수하다. 변환은 두 도메인을 모두 의존해도 되는 application에서만 한다.
+
+```kotlin
+// ❌ BAD — matching infra가 posting 테이블을 로우 쿼리로 직접 조회 (no-crosscontext-raw-read)
+class EvaluationTargetRepositoryImpl(private val jdbcTemplate: JdbcTemplate) : EvaluationTargetRepository {
+    override fun findAllPending() = jdbcTemplate.query(
+        "SELECT jp.id, jp.title, d.body FROM job_postings jp JOIN job_posting_descriptions d ...", // posting 소유 스키마에 결합
+    ) { rs, _ -> EvaluationTarget(...) }
+}
+
+// ✅ GOOD — application이 posting DomainService로 받아 매핑, matching은 자기 값 객체만 입력
+class MatchPostingsUseCase(
+    private val postingDomainService: PostingDomainService,   // 소유 컨텍스트
+    private val matchingDomainService: MatchingDomainService, // 소비 컨텍스트
+) {
+    @Transactional
+    fun execute(command: MatchPostingsCommand): MatchPostingsResult {
+        val postings = postingDomainService.getPendingWithBodyAndTags(command.scope) // posting 도메인 객체
+        val targets = postings.map(EvaluationTargetMapper::from)                     // application 매퍼가 변환
+        return MatchPostingsResult.of(matchingDomainService.evaluate(command.keywordSetId, targets))
+    }
+}
+```
 
 ## UseCase 규칙 (핵심)
 

@@ -1,16 +1,14 @@
-# 기본: 모든 것을 무시한다
-/*
+# ~/.harness — 여기 있는 것은 전부 authored 콘텐츠(SSOT)다.
+# 런타임 상태·중간 산출물만 무시한다.
 
-# 버전관리 대상만 화이트리스트로 허용
-!/.gitignore
-!/agents/
-!/commands/
-!/hooks/
-!/mcp/
-!/rules/
-!/skills/
+/runs/
+/.tmp/
+/adapters/**/.out/
 
-# ── OS / Python (허용 디렉토리 내부에서도 무시) ──
+*.bak
 .DS_Store
 __pycache__/
 *.pyc
+
+# 로컬 전용 시크릿 (policy.json 이 ${secrets.KEY} 로 참조)
+/secrets.local.json

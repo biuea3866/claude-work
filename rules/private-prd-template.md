@@ -1,3 +1,11 @@
+---
+id: private-prd-template
+title: [개인] PRD 템플릿
+scope: task
+level: MUST
+context: private
+---
+
 # [개인] PRD 템플릿
 
 개인 프로젝트용 PRD(Product Requirements Document) 구조. `private-prd-writer`가 작성 기준으로, `private-prd-reviewer`가 검수 기준으로, `private-senior-pm`이 정합 검증의 원본으로 참조한다 (SSOT).

@@ -1,3 +1,14 @@
+---
+id: private-db-schema-convention
+title: [개인] DB 스키마 컨벤션 (Flyway / MySQL 8.0)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/db/migration/*.sql"
+  - "**/*.sql"
+---
+
 # [개인] DB 스키마 컨벤션 (Flyway / MySQL 8.0)
 
 개인 프로젝트용 Flyway 마이그레이션 규칙. `private-mysql-implementer`가 작성 기준으로, `private-senior-dba`·`private-infra-reviewer`가 검수 기준으로 공통 참조한다 (SSOT). 회사 `db-schema-convention.md`의 자급자족 복사본.

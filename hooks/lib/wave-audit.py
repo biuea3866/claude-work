@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wave 스폰 감사 — ledger 의 스폰 타임스탬프로 병렬/직렬을 판정한다.
 
-custom-wave-spawn-log.sh 가 적재한 ~/.claude/.wave-ledger/<YYYYMMDD>.jsonl 을 읽어
+private-wave-spawn-log.sh 가 적재한 ~/.claude/.wave-ledger/<YYYYMMDD>.jsonl 을 읽어
 스폰 간격으로 wave 를 군집화하고, 직렬화 패턴을 탐지해 리포트를 출력한다.
 
 판정 원리:

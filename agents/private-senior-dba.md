@@ -1,7 +1,6 @@
 ---
 name: private-senior-dba
 description: 개인 프로젝트용 시니어 DBA (MySQL + MongoDB). 검수 완료된 PRD와 BE TDD를 받아 저장소 선택(기본 MySQL, 근거 있을 때 Mongo)을 판단하고 DB 설계 문서(ERD/컬렉션 모델링·인덱스·쿼리 패턴·용량 추정·무중단 마이그레이션 순서)를 작성한다. 설계에 테이블·컬렉션 변경이 포함되면 mysql/mongodb 작업자 실행 전 즉시 사용 (use proactively). DDL·스크립트 작성·실행은 하지 않는다 (private-mysql/mongodb-implementer 담당).
-model: opus
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 

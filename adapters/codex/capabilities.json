@@ -1,0 +1,29 @@
+{
+  "runtime": "codex",
+  "level": "L1",
+  "atoms": {
+    "read_file": true,
+    "write_file": true,
+    "exec_shell": true,
+    "spawn_subagent": false,
+    "hook_enforce": true,
+    "mcp": true
+  },
+  "verified": {
+    "hook_enforce": "확인됨 — ~/.codex/hooks.json 이 Claude Code와 동일 스키마 (type/command/timeout)",
+    "spawn_subagent": "probe — 별도 컨텍스트 에이전트 스폰 수단 미확인. L2 그래프는 L1로 강등해 실행",
+    "matcher_support": "probe — 관측된 hooks.json 샘플에 matcher 필드 없음. 다만 doctor 스캔 결과 게이트 22개 전부가 tool_name/tool_input 을 파싱해 자체 가드하므로, matcher 부재 자체는 차단 요인이 아니다",
+    "hook_stdin_shape": "probe — **실제 남은 위험은 이것이다.** codex 가 훅 stdin 으로 {tool_name, tool_input} 과 같은 shape 를 주는지 미확인. shape 가 다르면 스크립트의 자체 가드가 파싱에 실패하고 `|| true` 경로로 빠져 **조용히 exit 0**(무강제)이 된다. 실측 전까지 --install 금지"
+  },
+  "entrypoint": "~/.codex/AGENTS.md",
+  "config_files": ["~/.codex/hooks.json", "~/.codex/config.toml"],
+  "link_strategy": "per-item",
+  "_link_note": "~/.codex/rules 는 단일 default.rules 파일이라 디렉토리 심링크 불가. ~/.codex/skills 에는 하네스가 소유하지 않는 외부 스킬이 이미 있어 통째 링크하면 가린다. 따라서 항목 단위로만 링크한다.",
+  "links": {
+    "~/.codex/skills/<each harness skill>": "skills/<name>"
+  },
+  "unowned": {
+    "~/.codex/config.toml": "하네스가 소유하지 않는다. model·trust_level·mcp_servers는 사용자 소유. 어댑터는 제안 fragment만 .out/ 에 출력하고 적용하지 않는다.",
+    "~/.codex/rules/default.rules": "포맷이 다른 별도 자산. AGENTS.md가 ~/.harness/rules 를 절대경로로 참조하는 방식으로 대체한다."
+  }
+}

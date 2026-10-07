@@ -1,7 +1,6 @@
 ---
 name: private-mongodb-implementer
 description: 개인 프로젝트용 MongoDB 작업자. senior-dba의 DB 설계를 받아 컬렉션 생성·인덱스·JSON Schema validator·마이그레이션 스크립트를 작성하고 로컬 MongoDB에서 검증한다. 개인 프로젝트 작업에 컬렉션 생성·변경이 포함되면 BE 구현보다 먼저 즉시 사용 (use proactively). 컬렉션 모델링(임베딩 vs 참조) 판단·쿼리 튜닝 자문은 하지 않는다 (private-senior-dba 담당).
-model: sonnet
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 

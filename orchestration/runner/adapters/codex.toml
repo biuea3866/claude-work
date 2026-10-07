@@ -1,0 +1,62 @@
+# 런타임 어댑터 — OpenAI Codex CLI (`codex exec`)
+#
+# 스키마와 추가 절차: adapters/README.md
+
+id = "codex"
+description = "Codex CLI — 읽기 전용 리뷰·설계 노드용. --output-schema 로 출력 형식을 강제할 수 있다."
+
+base = ["codex", "exec", "--skip-git-repo-check", "--ephemeral"]
+
+prompt_delivery = "argv"
+
+# codex 는 -o 로 최종 메시지를 직접 파일에 쓴다.
+result = "out_file"
+
+[defaults]
+sandbox = "read-only"
+
+[flags]
+model = ["-m", "{value}"]
+effort = ["-c", "model_reasoning_effort=\"{value}\""]
+sandbox = ["-s", "{value}"]
+output_schema = ["--output-schema", "{root_path}"]
+
+# 러너가 채우는 슬롯. out_file 은 노드 산출물 경로, cwd 는 실행 디렉토리.
+[runtime]
+out_file = ["-o", "{path}"]
+cwd = ["-C", "{path}"]
+
+# ── 접근 등급 → 런타임 네이티브 키 ──
+# 상세는 claude.toml 의 [access] 주석 참조.
+[access]
+read-only = { sandbox = "read-only" }
+workspace-write = { sandbox = "workspace-write" }
+full = { sandbox = "danger-full-access" }
+
+# ── 런타임 소진 시 failover ──
+# 상세 규칙은 claude.toml 의 [failover] 주석 참조.
+#
+# ⚠ codex → claude 로 넘어가면 `--output-schema` 를 넘길 수 없다 (claude 에는 스키마 강제
+#   수단이 없다). 러너가 응답에서 JSON 을 추출하는 방식으로 떨어져 파싱 실패 확률이 올라간다.
+#   우회가 아니라 감수하는 품질 저하이며, 제거 사실이 로그·journal 에 기록된다.
+#   계약 검증(harness run done)은 그대로 걸리므로 깨진 산출물이 completed 가 되지는 않는다.
+[failover]
+fallback_to = "claude"
+fallback_model = "sonnet"
+exhaustion_patterns = [
+  "usage limit",
+  "rate.?limit",
+  "insufficient_quota",
+  "quota exceeded",
+  "\"status\"\\s*:\\s*429",
+  "429 too many requests",
+  # 관측(2026-08-21): codex 는 용량 부족을 "Selected model is at capacity" 로 알린다.
+  # quota 계열 문구가 아니라 위 패턴이 하나도 안 걸리고, 출력 파일을 안 써서 파싱 오류로 죽었다.
+  # 일시적 용량도 소진과 같이 취급한다 — 기다리는 대신 런타임을 바꾼다.
+  "is at capacity",
+]
+
+[failover.translate.sandbox]
+"read-only" = { key = "permission_mode", value = "dontAsk" }
+"workspace-write" = { key = "permission_mode", value = "acceptEdits" }
+"danger-full-access" = { key = "permission_mode", value = "bypassPermissions" }

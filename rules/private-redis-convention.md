@@ -1,3 +1,15 @@
+---
+id: private-redis-convention
+title: [개인] Redis 컨벤션 (캐시 / 락 / 랭킹·세션 / pub-sub)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/docker-compose*.yml"
+  - "**/docker-compose*.yaml"
+  - "**/redis/**"
+---
+
 # [개인] Redis 컨벤션 (캐시 / 락 / 랭킹·세션 / pub-sub)
 
 개인 프로젝트용 Redis 규칙. `private-redis-implementer`가 설계 기준으로, `private-infra-reviewer`가 검수 기준으로 공통 참조한다 (SSOT).

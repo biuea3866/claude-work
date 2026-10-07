@@ -1,3 +1,16 @@
+---
+id: private-fe-convention
+title: [개인] FE 코드 컨벤션 (React / React Native)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/*.tsx"
+  - "**/*.ts"
+  - "**/*.jsx"
+  - "**/*.js"
+---
+
 # [개인] FE 코드 컨벤션 (React / React Native)
 
 개인 프로젝트용 FE 컨벤션 — React(웹) + React Native(앱). `private-fe-implementer`, `private-senior-fe`, `private-code-reviewer`가 공통 참조한다 (SSOT).

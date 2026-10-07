@@ -1,7 +1,6 @@
 ---
 name: private-redis-implementer
 description: 개인 프로젝트용 Redis 작업자. 키 스키마·TTL·자료구조·분산 락·pub/sub 채널을 설계하고 docker compose 설정을 작성한다. 개인 프로젝트 작업에 캐시·락·랭킹·세션·경량 메시징이 포함되면 BE 구현보다 먼저 즉시 사용 (use proactively). RedisTemplate·CacheConfig 등 앱 코드는 작성하지 않는다 (private-be-implementer 담당).
-model: sonnet
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 

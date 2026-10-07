@@ -1,7 +1,6 @@
 ---
 name: private-kafka-implementer
 description: 개인 프로젝트용 Kafka 작업자. 로컬 docker compose 환경에서 토픽 설계(파티션·보존·압축)·JSON 메시지 스키마 정의·브로커/클라이언트 설정을 담당한다. 개인 프로젝트 작업에 신규 토픽·이벤트가 포함되면 Producer/Consumer 구현보다 먼저 즉시 사용 (use proactively). Producer/Consumer 코드는 작성하지 않는다 (private-be-implementer 담당).
-model: sonnet
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 

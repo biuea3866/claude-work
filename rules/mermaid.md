@@ -1,3 +1,14 @@
+---
+id: mermaid
+title: Mermaid 다이어그램 가이드
+scope: task
+level: MUST
+context: common
+paths:
+  - "**/*.md"
+  - "**/*.mmd"
+---
+
 # Mermaid 다이어그램 가이드
 
 ## 기본 규칙
@@ -8,14 +19,14 @@
 
 ## PNG 변환
 
-Jira/Confluence는 Mermaid를 지원하지 않습니다. PNG로 변환하여 첨부합니다.
+Mermaid를 렌더링하지 못하는 곳에 붙일 때는 PNG로 변환합니다.
 
 ```bash
 mmdc -i input.mmd -o output.png -w 4800 -b white -t default -s 4
 ```
 
 - `-w 4800`: 가로 4800px (고해상도 — 확대해도 선명)
-- `-b white`: 흰 배경 필수 (Confluence/Jira 첨부 시)
+- `-b white`: 흰 배경 (문서 첨부 시 가독성)
 - `-s 4`: 스케일 4배
 
 ## 다이어그램 유형별 예시
@@ -57,11 +68,12 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
-    WORKSPACE ||--o{ OPENING : has
-    OPENING ||--o{ APPLICANT : receives
-    APPLICANT {
+    USER ||--o{ ALERT : owns
+    ALERT ||--o{ ALERT_HISTORY : records
+    ALERT {
         bigint id PK
-        bigint opening_id FK
+        bigint user_id FK
+        varchar symbol
         varchar status
     }
 ```
@@ -74,7 +86,7 @@ flowchart LR
         ServiceA
     end
     subgraph Kafka
-        Topic[plan.downgrade]
+        Topic[alert.triggered]
     end
     subgraph Consumer
         ServiceB

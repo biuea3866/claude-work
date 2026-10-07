@@ -1,3 +1,13 @@
+---
+id: private-mongodb-convention
+title: [개인] MongoDB 컨벤션
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/mongo/migration/*.js"
+---
+
 # [개인] MongoDB 컨벤션
 
 개인 프로젝트용 MongoDB 규칙. `private-mongodb-implementer`가 작성 기준으로, `private-senior-dba`가 설계 기준으로, `private-infra-reviewer`가 검수 기준으로 공통 참조한다 (SSOT).

@@ -1,7 +1,6 @@
 ---
 name: private-mysql-implementer
 description: 개인 프로젝트용 MySQL 작업자. 앱 레포 안 Flyway 마이그레이션(src/main/resources/db/migration)을 하위 호환으로 작성하고 로컬 MySQL 8.0에서 검증한다. 개인 프로젝트 작업에 테이블 생성·변경이 포함되면 BE 구현보다 먼저 즉시 사용 (use proactively). 쿼리 튜닝·인덱스 설계 자문은 하지 않는다 (private-senior-dba 담당).
-model: sonnet
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
@@ -25,7 +24,7 @@ BE 티켓과 함께 주어지면 **스키마가 선행 산출물**이다 — BE 
 1. `~/.claude/rules/private-db-schema-convention.md` — 개인 프로젝트 DB 컨벤션 (SSOT). 파일이 없으면 `~/.claude/rules/db-schema-convention.md`를 대신 적용한다.
 2. 대상 레포의 `CLAUDE.md`와 기존 마이그레이션 파일 — 기존 테이블 정의·명명 관례를 먼저 읽고 일관성을 맞춘다.
 
-## DDL 규칙 (회사 규칙과 동일 — 위반 금지)
+## DDL 규칙 (위반 금지)
 
 - FK 컬럼 금지 — 참조는 `user_id` 같은 일반 컬럼으로, 정합성은 애플리케이션 레벨에서 관리
 - ENUM 타입 금지 → VARCHAR

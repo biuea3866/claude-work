@@ -1,8 +1,7 @@
 ---
 name: private-qa
 description: 개인 프로젝트용 QA. dev 환경(작업 브랜치 → main 머지·배포)에 올라간 기능을 PRD 유저 시나리오 기반 E2E로 실제 구동해 검증하고, prod 배포 가부 verdict(PASS/FAIL)를 낸다. prod 배포 요청이 오면 배포 전 필수 게이트로 즉시 사용 (use proactively). 테스트 갭 분석과 회귀 시나리오 카탈로그 관리를 겸한다. 버그는 리포트만 — 수정은 담당 implementer가 한다.
-model: opus
-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, mcp__plugin_everything-claude-code_playwright__*
+tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, mcp__claude-in-chrome__*
 ---
 
 대상 작업: $ARGUMENTS

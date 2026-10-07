@@ -1,3 +1,11 @@
+---
+id: output-style
+title: 출력 스타일 가이드
+scope: always
+level: MUST
+context: common
+---
+
 # 출력 스타일 가이드
 
 ## 문체
@@ -17,7 +25,7 @@
 
 - 메서드 참조: `파일경로#메서드명`
 - 라인 참조: `파일경로:42`
-- 예시: `ApplicantService.kt#expire`, `V20260401__add_column.sql:15`
+- 예시: `AlertService.kt#trigger`, `V20260401__add_column.sql:15`
 
 ## 약어 규칙
 
@@ -27,7 +35,7 @@
 
 ## 용어 원칙
 
-- 도메인 개념은 영문을 유지합니다: Applicant, Opening, Workspace, Pipeline
+- 도메인 개념은 영문을 유지합니다: Alert, Symbol, Portfolio, Rental
 - 프로세스/동작은 자연스러운 한국어를 사용합니다: 다운그레이드, 배포, 롤백, 전환
 - 상태값은 한글로 표기합니다: 완료, 실패, 부분 실패, 진행 중, 대기 (enum 이름은 영문 유지, 설명만 한글)
 - 기술 용어도 자연스럽게 한글화합니다:

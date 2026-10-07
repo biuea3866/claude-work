@@ -1,6 +1,14 @@
+---
+id: private-code-review-criteria
+title: [개인] 코드 리뷰 기준 (p0~p5)
+scope: task
+level: MUST
+context: private
+---
+
 # [개인] 코드 리뷰 기준 (p0~p5)
 
-개인 프로젝트용 코드 리뷰 등급·체크 항목·출력 형식. `private-code-reviewer`가 단일 기준(SSOT)으로 참조하고, `private-infra-reviewer`는 verdict 규칙을 공유한다. 회사 `code-review-criteria.md`의 자급자족 복사본 — 출력은 터미널 전용, GitHub 코멘트 없음.
+개인 프로젝트용 코드 리뷰 등급·체크 항목·출력 형식. `private-code-reviewer`가 단일 기준(SSOT)으로 참조하고, `private-infra-reviewer`는 verdict 규칙을 공유한다. 출력은 터미널 전용 — GitHub 코멘트는 달지 않는다.
 
 ## 등급(pn) 및 verdict
 

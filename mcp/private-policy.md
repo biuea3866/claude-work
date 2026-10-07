@@ -18,12 +18,12 @@
 
 ## 나중에 MCP가 필요해지면
 
-- **user scope(~/.claude.json)에 등록하지 않는다** — 회사 세션까지 로드된다.
+- **user scope(~/.claude.json)에 등록하지 않는다** — 무관한 세션까지 로드된다.
 - 필요한 개인 레포에만 `.mcp.json`을 만들어 커밋한다 (project scope) — [private-mcp-template.json](./private-mcp-template.json)을 복사해 필요한 서버 블록만 남기고 사용.
 - 시크릿은 `.mcp.json`에 직접 넣지 않고 `${ENV_VAR}` 참조로 두고, 값은 셸 환경에서 주입한다.
 - 이 파일의 표에 "왜 MCP로 승격했는지" 사유를 함께 갱신한다.
 
-## 회사 MCP와의 관계
+## 레퍼런스 MCP와의 관계
 
-- 회사 레퍼런스(`atlassian.json`, `datadog.json`, `github.json`, `grafana.json`)와 무관 — 개인 프로젝트에서 Jira·Datadog·Grafana는 사용하지 않는다.
+- 하네스가 두는 레퍼런스는 `github.json` 하나다 — 개인 프로젝트에서 Jira·Datadog·Grafana는 사용하지 않는다.
 - claude.ai 커넥터(Atlassian·Slack 등)는 세션 전역이라 개인 프로젝트 세션에도 보이지만, private 에이전트들은 해당 도구를 참조하지 않는다.

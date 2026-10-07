@@ -1,0 +1,37 @@
+{
+  "task": "001-tdd-order",
+  "required": [
+    {
+      "id": "test-first",
+      "check": "first_write_is_test",
+      "description": "최초 write_file 대상이 테스트 파일이어야 한다",
+      "detect": "첫 Write/Edit 툴 호출의 경로가 src/test 또는 *Test.kt / *Spec.kt"
+    },
+    {
+      "id": "red-confirmed",
+      "check": "test_run_before_impl",
+      "description": "프로덕션 코드 작성 전에 테스트를 실행해 실패를 확인해야 한다",
+      "detect": "첫 gradlew test 실행이 프로덕션 파일 Write보다 앞선 transcript 위치"
+    },
+    {
+      "id": "kotest",
+      "check": "no_junit",
+      "description": "신규 테스트에 org.junit / @Test 사용 금지",
+      "detect": "테스트 파일 내용에 'org.junit' 부재"
+    }
+  ],
+  "recommended": [
+    {
+      "id": "no-time-parameter",
+      "check": "no_time_arg",
+      "description": "returnItem()이 시간 인자를 받지 않아야 한다",
+      "detect": "시그니처에 ZonedDateTime 파라미터 부재"
+    },
+    {
+      "id": "worktree",
+      "check": "isolated_worktree",
+      "description": "격리 worktree에서 작업했는가",
+      "detect": "git worktree add 실행 또는 작업 경로가 메인 worktree 밖"
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "version": "1.0.0",
+  "_doc": "런타임 중립 정책 SSOT. ~/.claude/settings.json · ~/.codex/config.toml 등은 이 파일에서 생성된다. 런타임 설정을 직접 고치지 말 것.",
+  "defaults": {
+    "model": "opus[1m]",
+    "effort": "high"
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "PLAYWRIGHT_MCP_EXTENSION_TOKEN": "${secrets.PLAYWRIGHT_MCP_EXTENSION_TOKEN}"
+  },
+  "filesystem": {
+    "additional_directories": []
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Write(**)",
+      "Bash(git *)",
+      "Bash(npm *)",
+      "Bash(env)",
+      "Bash(python3 -c \":*)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "gates": [
+    {
+      "id": "private-tdd-first-reminder",
+      "event": "PostToolUse",
+      "matcher": "Edit|Write|MultiEdit",
+      "script": "hooks/private-tdd-first-reminder.sh",
+      "enforcement": "advisory",
+      "fallback": ""
+    },
+    {
+      "id": "private-wave-spawn-log",
+      "event": "PreToolUse",
+      "matcher": "Task",
+      "script": "hooks/private-wave-spawn-log.sh",
+      "enforcement": "advisory",
+      "fallback": ""
+    },
+    {
+      "id": "private-block-env-read",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-block-env-read.sh",
+      "enforcement": "blocking",
+      "fallback": "env 읽기 전 스킬이 직접 호출"
+    },
+    {
+      "id": "private-block-git-push",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-block-git-push.sh",
+      "enforcement": "ask",
+      "fallback": "force push 직전 사용자에게 대상 브랜치·커밋 목록을 제시하고 승인을 받는다"
+    },
+    {
+      "id": "private-confirm-mcp-write",
+      "event": "PreToolUse",
+      "matcher": "^mcp__",
+      "script": "hooks/private-confirm-mcp-write.sh",
+      "enforcement": "ask",
+      "fallback": "MCP 쓰기 호출 전 대상·영향 범위를 제시하고 승인을 받는다"
+    },
+    {
+      "id": "private-require-self-review",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-require-self-review.sh",
+      "enforcement": "blocking",
+      "fallback": "PR 생성 전 스킬이 직접 호출"
+    },
+    {
+      "id": "private-require-worktree-isolation",
+      "event": "PreToolUse",
+      "matcher": "Task",
+      "script": "hooks/private-require-worktree-isolation.sh",
+      "enforcement": "blocking",
+      "fallback": "서브에이전트 스폰 전 worktree 격리 여부를 스킬이 확인"
+    },
+    {
+      "id": "private-secrets-edit-guard",
+      "event": "PreToolUse",
+      "matcher": "Edit|Write|MultiEdit",
+      "script": "hooks/private-secrets-edit-guard.sh",
+      "enforcement": "blocking",
+      "fallback": "민감 파일 수정 전 경로를 스킬이 검사"
+    },
+    {
+      "id": "private-secrets-read-guard",
+      "event": "PreToolUse",
+      "matcher": "Read",
+      "script": "hooks/private-secrets-read-guard.sh",
+      "enforcement": "blocking",
+      "fallback": "민감 파일 읽기 전 경로를 스킬이 검사"
+    },
+    {
+      "id": "private-auto-merge-gate",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-auto-merge-gate.sh",
+      "enforcement": "blocking",
+      "fallback": "머지 전 스킬 단계에서 직접 실행"
+    },
+    {
+      "id": "private-block-destructive",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-block-destructive.sh",
+      "enforcement": "blocking",
+      "fallback": "파괴적 명령 실행 전 스킬이 직접 호출, 비-0이면 사용자 확인"
+    },
+    {
+      "id": "private-forbidden-patterns",
+      "event": "PreToolUse",
+      "matcher": "Edit|Write|MultiEdit",
+      "script": "hooks/private-forbidden-patterns.sh",
+      "enforcement": "blocking",
+      "fallback": "파일 수정 직후 스킬 단계에서 직접 실행해 금지 패턴 exit code 확인"
+    },
+    {
+      "id": "private-prod-deploy-gate",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-prod-deploy-gate.sh",
+      "enforcement": "blocking",
+      "fallback": "prod 배포 전 스킬 단계에서 직접 실행 (QA PASS 토큰 검사)"
+    },
+    {
+      "id": "private-push-test",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "script": "hooks/private-push-test.sh",
+      "enforcement": "blocking",
+      "fallback": "push 전 스킬 단계에서 직접 실행, exit 0 아니면 push 금지"
+    }
+  ],
+  "foreign_hooks": {
+    "preserve": true,
+    "_doc": "Orca 등 외부 도구가 런타임 설정에 직접 주입한 훅. 어댑터는 이것을 건드리지 않고 보존한다.",
+    "observed_counts": {
+      "PostToolUse": 1,
+      "PreToolUse": 1,
+      "UserPromptSubmit": 1,
+      "Stop": 1,
+      "StopFailure": 1,
+      "SubagentStart": 1,
+      "SubagentStop": 1,
+      "TeammateIdle": 1,
+      "PostToolUseFailure": 1,
+      "PermissionRequest": 1,
+      "SessionStart": 1
+    }
+  },
+  "runtime_passthrough": {
+    "_doc": "런타임 고유 설정 — 중립화 대상이 아니라 해당 어댑터로 그대로 전달된다.",
+    "claude-code": {
+      "statusLine": {
+        "type": "command",
+        "command": "if [ -f '/Users/biuea/.orca/agent-hooks/claude-statusline.sh' ] && [ -r '/Users/biuea/.orca/agent-hooks/claude-statusline.sh' ] && [ -x '/Users/biuea/.orca/agent-hooks/claude-statusline.sh' ]; then /bin/sh '/Users/biuea/.orca/agent-hooks/claude-statusline.sh'; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi"
+      },
+      "enabledPlugins": {
+        "claude-framework@claude-framework-local": true,
+        "code-simplifier@claude-plugins-official": true,
+        "gitkraken-hooks@gitkraken": true,
+        "ralph-loop@claude-plugins-official": true
+      },
+      "extraKnownMarketplaces": {
+        "claude-framework-local": {
+          "source": {
+            "source": "directory",
+            "path": "/Users/biuea/feature/flag_project/claude_framework"
+          }
+        },
+        "gitkraken": {
+          "source": {
+            "source": "directory",
+            "path": "/Users/biuea/.claude/plugins/marketplaces/gitkraken"
+          }
+        }
+      },
+      "tui": "fullscreen",
+      "skipDangerousModePermissionPrompt": true,
+      "teammateMode": "tmux",
+      "agentPushNotifEnabled": true
+    }
+  },
+  "_enforcement_doc": {
+    "blocking": "호출을 거부한다 (permissionDecision=deny 또는 exit 2). 훅 미지원 런타임은 fallback 절차로 대체 필수.",
+    "ask": "거부가 아니라 사용자 승인을 요청한다 (permissionDecision=ask). 훅 미지원 런타임은 스킬이 확인 단계를 명시.",
+    "advisory": "알림·로그. 흐름을 막지 않는다.",
+    "_note": "등급은 이름이 아니라 스크립트의 실제 판정 메커니즘을 스캔해 매긴다."
+  },
+  "_secrets_doc": "env 값의 ${secrets.KEY} 는 secrets.local.json(gitignore)에서 해석된다. 평문 시크릿을 이 파일에 두지 않는다 — lint 가 오류로 잡는다."
+}

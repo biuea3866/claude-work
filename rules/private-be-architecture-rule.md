@@ -1,3 +1,14 @@
+---
+id: private-be-architecture-rule
+title: [개인] BE 아키텍처 규칙 — 이벤트 기반 아키텍처 (Event-Driven Architecture)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/*.kt"
+  - "**/*.kts"
+---
+
 # [개인] BE 아키텍처 규칙 — 이벤트 기반 아키텍처 (Event-Driven Architecture)
 
 개인 프로젝트용 BE 시스템 아키텍처 규칙. 코드 라인 컨벤션([private-be-code-convention](./private-be-code-convention.md))과 분리해, **도메인 간 결합을 어떻게 끊을 것인가(이벤트 발행/구독 구조)** 를 다룬다. `private-architect`가 구조 설계 기준으로, `private-senior-be`가 TDD 설계 기준으로, `private-be-implementer`가 구현 기준으로, `private-code-reviewer`가 검수 기준으로 공통 참조한다 (SSOT).

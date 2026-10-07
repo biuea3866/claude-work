@@ -1,3 +1,14 @@
+---
+id: private-deploy-convention
+title: [개인] 배포 컨벤션 (로컬 Docker — dev/prod 이원화)
+scope: task
+level: MUST
+context: private
+paths:
+  - "**/docker-compose*.yml"
+  - "**/docker-compose*.yaml"
+---
+
 # [개인] 배포 컨벤션 (로컬 Docker — dev/prod 이원화)
 
 개인 프로젝트의 배포 규칙. 배포 대상은 로컬 Docker이며, dev/prod를 compose 파일로 분리한다. `private-qa`·`private-senior-be`(Release Scenario)·hook `private-prod-deploy-gate.sh`가 공통 참조한다 (SSOT).

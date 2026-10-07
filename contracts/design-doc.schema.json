@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/design-doc.schema.json",
+  "title": "DesignDoc",
+  "description": "design.be / design.fe / design.db 노드의 출력 계약. TDD 템플릿 필수 섹션과 티켓 DAG의 fan-out 게이트를 기계적으로 강제한다.",
+  "type": "object",
+  "required": ["doc_path", "sections_present", "tickets", "waves", "summary_md"],
+  "additionalProperties": false,
+  "properties": {
+    "doc_path": { "type": "string", "minLength": 1 },
+    "sections_present": {
+      "type": "array",
+      "description": "private-tdd 필수 섹션. 하나라도 빠지면 design.review가 NEEDS_REVISION.",
+      "items": {
+        "enum": [
+          "Background", "Overview", "Terminology", "Define Problem",
+          "Architecture Benchmarking", "Possible Solutions", "Detail Design",
+          "ERD", "Testing Plan", "Release Scenario", "Open Questions"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "tickets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "title", "depends_on", "files_touched"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^(BE|FE|DB|INFRA)-[0-9]+$" },
+          "role": {
+            "description": "이 티켓을 수행할 role. implement 노드의 fanout 라우팅 키다 — 접두사만으로는 결정할 수 없다 (DB → mysql/mongodb, INFRA → kafka/redis).",
+            "enum": [
+              "implement.be", "implement.fe", "implement.mysql",
+              "implement.mongodb", "implement.kafka", "implement.redis"
+            ]
+          },
+          "title": { "type": "string", "minLength": 1 },
+          "depends_on": { "type": "array", "items": { "type": "string" } },
+          "files_touched": {
+            "type": "array",
+            "description": "Single Writer per File 검증용. 같은 wave 내 교집합이 있으면 분해 실패.",
+            "items": { "type": "string" }
+          },
+          "size": { "enum": ["S", "M", "L"] },
+          "path": {
+            "type": "string",
+            "description": "티켓 md 경로. 구현자에게 프롬프트로 주입된다 — 티켓 md 가 작업 내용의 SSOT다 (rules/private-ticket.md)."
+          }
+        }
+      }
+    },
+    "waves": {
+      "type": "array",
+      "description": "위상정렬 결과. 모든 wave 너비가 1~2인 직선형 DAG는 분해 실패다.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["index", "ticket_ids"],
+        "additionalProperties": false,
+        "properties": {
+          "index": { "type": "integer", "minimum": 1 },
+          "ticket_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+        }
+      }
+    },
+    "max_wave_width": { "type": "integer", "minimum": 1 },
+    "summary_md": { "type": "string", "minLength": 1 },
+    "degraded": {
+      "type": "object",
+      "properties": { "reason": { "type": "string" }, "path": { "type": "string" } }
+    }
+  }
+}

@@ -1,3 +1,11 @@
+---
+id: COMPLETION-RULE
+title: 완료 단언 규칙 (Completion Assertion Rule)
+scope: always
+level: MUST
+context: common
+---
+
 # 완료 단언 규칙 (Completion Assertion Rule)
 
 모든 PIPELINE.md 가 공통으로 따르는 "완료" 단언 룰. 운영 사고(Kafka SCRAM 누락, 잘못된 update 라인, "완벽하게 테스트" 거짓 단언) 재발 방지.

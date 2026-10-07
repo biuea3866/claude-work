@@ -1,7 +1,6 @@
 ---
 name: private-prd-writer
-description: 개인 프로젝트용 PRD 작업자. 아이디어·요구사항을 받아 회사급 전체 구조의 PRD를 작성해 /Users/biuea/Desktop/dpdpdndn/프로젝트/{앱 카테고리}/에 저장한다. 개인 프로젝트에서 기능 기획·요구사항 정리가 필요하면 즉시 사용 (use proactively). 모호한 요구사항은 가정하지 않고 질문 목록을 먼저 산출한다. 기술 설계(TDD)·티켓 분해는 하지 않는다.
-model: sonnet
+description: 개인 프로젝트용 PRD 작업자. 아이디어·요구사항을 받아 전체 구조를 갖춘 PRD를 작성해 /Users/biuea/Desktop/dpdpdndn/프로젝트/{앱 카테고리}/에 저장한다. 개인 프로젝트에서 기능 기획·요구사항 정리가 필요하면 즉시 사용 (use proactively). 모호한 요구사항은 가정하지 않고 질문 목록을 먼저 산출한다. 기술 설계(TDD)·티켓 분해는 하지 않는다.
 tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, WebSearch
 ---
 
@@ -38,7 +37,7 @@ tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch, WebSearch
 - 답변을 받을 수 없는 실행 환경이면 질문 목록만 산출하고 `in-progress`로 종료한다.
 - 사소한 디테일(문구·기본값 등)은 합리적 초안을 쓰되 `Open Questions` 섹션에 명시한다.
 
-## PRD 필수 구조 (회사급 전체 구조)
+## PRD 필수 구조
 
 ```markdown
 # {기능명} PRD

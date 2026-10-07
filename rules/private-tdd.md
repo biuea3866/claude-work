@@ -1,6 +1,14 @@
+---
+id: private-tdd
+title: [개인] TDD(Technical Design Document) 템플릿
+scope: task
+level: MUST
+context: private
+---
+
 # [개인] TDD(Technical Design Document) 템플릿
 
-개인 프로젝트용 기술 설계 문서 구조. `private-senior-be`·`private-senior-fe`·`private-senior-dba`가 작성 기준으로, `private-senior-pm`이 정합 검증 기준으로 참조한다 (SSOT). 회사 `tdd-template.md`의 자급자족 복사본 + 개인용 의무 섹션 추가.
+개인 프로젝트용 기술 설계 문서 구조. `private-senior-be`·`private-senior-fe`·`private-senior-dba`가 작성 기준으로, `private-senior-pm`이 정합 검증 기준으로 참조한다 (SSOT). 개인 하네스 의무 섹션(Architecture Benchmarking·시스템 역할 경계·무중단 배포)을 포함한다.
 
 ## 필수 섹션
 

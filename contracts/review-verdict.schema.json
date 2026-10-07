@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/review-verdict.schema.json",
+  "title": "ReviewVerdict",
+  "description": "리뷰 계열 노드(review.code / review.infra / prd.review / design.review)의 출력 계약. verdict가 기계 분기 값이고, findings는 근거를 강제한다.",
+  "type": "object",
+  "required": ["verdict", "findings", "summary_md", "reviewed"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "description": "p0~p2가 하나라도 있으면 REQUEST_CHANGES, p3~p4만이면 COMMENT, 없으면 APPROVED",
+      "enum": ["APPROVED", "COMMENT", "REQUEST_CHANGES"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["level", "file", "line", "problem", "direction"],
+        "additionalProperties": false,
+        "properties": {
+          "level": { "enum": ["p0", "p1", "p2", "p3", "p4", "p5"] },
+          "file": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "rule_id": {
+            "type": "string",
+            "description": "위반한 rules/ 규칙 ID. 추측성 지적을 막는다."
+          },
+          "problem": { "type": "string", "minLength": 10 },
+          "direction": { "type": "string", "minLength": 10, "description": "수정 방향" }
+        }
+      }
+    },
+    "reviewed": {
+      "type": "object",
+      "description": "전수 Read 원칙의 기계적 증거. 변경 파일 수와 읽은 파일 수가 다르면 리뷰가 부실한 것이다.",
+      "required": ["files_changed", "files_read"],
+      "additionalProperties": false,
+      "properties": {
+        "files_changed": { "type": "integer", "minimum": 0 },
+        "files_read": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "summary_md": { "type": "string", "minLength": 1, "description": "사람이 읽을 요약. 뒤 노드는 이걸 파싱하지 않는다." },
+    "degraded": {
+      "type": "object",
+      "description": "적합성 레벨 부족으로 강등 실행했을 때만 채운다.",
+      "properties": {
+        "reason": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    }
+  }
+}
