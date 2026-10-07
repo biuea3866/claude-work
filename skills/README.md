@@ -1,14 +1,15 @@
-# skills — 자연어 호출 절차 (10개)
+# skills — 자연어 호출 절차 (11개)
 
 단계는 **role** 만 참조한다. 구체 agent·모델을 직접 부르지 않는다 — lint 가 `Agent(private-*)` 직접 호출을 오류로 잡는다.
 
-## 하네스 소유 (4개)
+## 하네스 소유 (5개)
 
 frontmatter 에 `requires`(적합성 레벨)·`roles`(사용 role) 선언 필수.
 
 | 스킬 | requires | 용도 |
 |---|---|---|
 | `/private-architect` | L1 | 개인 프로젝트 아키텍처 진단 — 앱 카테고리·진단 범위·참고 PRD를 받아 private-architect 에이전트로 AS-IS 구조 조사·트래픽 적합성 진단·구… |
+| `/private-design` | L2 | 개인 프로젝트 디자인 — 디자인을 모르는 사용자 전제. 쉬운 질문 → HTML 시안 비교 → 선택. 모드 system(토큰·컴포넌트 카탈로그)·spec(화면 설계)·review(하드코딩 색·다크 모드·대비·상태 처리 검수)… |
 | `/private-feature` | L2 | 개인 프로젝트 풀 파이프라인 — PRD 작성→검수→시니어 설계(be 먼저, fe/dba 병렬)→pm 정합 검증→구현 지휘(wave 병렬)→리뷰→PR 자동머지. 요… |
 | `/private-implement` | L1 | 개인 프로젝트 경량 파이프라인 — 교차 런타임 TDD: 컨텍스트 이중 분석(A‖B) → RED(B) → GREEN/REFACTOR(A) → 결정적 게이트 → 교차 리뷰(B, 재작업 최대 2회, p0~p3 0건) → draft PR → 회고 → (사용자 확인 후) 머지… |
 | `/private-release` | L1 | 개인 프로젝트 prod 릴리즈 — private-qa로 배포 가부를 조사하고, PASS면 YYYYMMDD-NN 태그를 따서 prod 프로필로 배포한다. QA FA… |
