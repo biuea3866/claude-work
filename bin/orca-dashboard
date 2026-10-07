@@ -69,7 +69,7 @@ KNOWN_AGENT_STATES = ("working", "done", "idle", None)
 ATTENTION_STATUSES = ("blocked", "waiting_user", "stale")
 
 TRANSCRIPT_DIR_UNSAFE_RE = re.compile(r"[^A-Za-z0-9]")
-TRANSCRIPT_MATCH_CHARS = 60
+ORCA_PROMPT_LIMIT = 200  # Orca 가 agents[].prompt 를 자르는 길이 (실측)
 TRANSCRIPT_TITLE_CHARS = 80
 PROMPT_TEXT_CHARS = 160
 TIMELINE_LIMIT = 60
@@ -735,15 +735,16 @@ def _normalized(text: str | None) -> str:
     return " ".join((text or "").split())
 
 
-def _texts_match(expected: str, actual: str | None) -> bool:
-    """정규화 후 전체 일치. 한쪽이 잘린 경우(짧은 쪽 60자 이상)만 접두사 일치 허용."""
+def _texts_match(expected: str, actual: str | None, *, truncated: bool = False) -> bool:
+    """정규화 후 전체 일치. expected 가 잘린 원문(truncated)일 때만 actual 이 그것으로 시작하면 일치."""
     actual = _normalized(actual)
     if not expected or not actual:
         return False
-    if expected == actual:
-        return True
-    shorter, longer = sorted((expected, actual), key=len)
-    return len(shorter) >= TRANSCRIPT_MATCH_CHARS and longer.startswith(shorter)
+    return actual == expected or (truncated and actual.startswith(expected))
+
+
+class TranscriptReadError(OSError):
+    """일치하는 transcript 가 없고, 그 원인이 파일·디렉토리 읽기 실패일 수 있을 때."""
 
 
 def _first_line(text, limit: int) -> str | None:
@@ -1105,26 +1106,34 @@ _TRANSCRIPTS = _FileMemo(_read_transcript, max_entries=64)
 def find_transcript(
     directory: str, prompt: str | None, last_message: str | None = None, *, sole_session: bool = False
 ) -> str | None:
-    """공백 정규화 후 앞 60자 비교로 transcript 선택 (mtime 최신 우선).
+    """공백 정규화 후 전체 일치로 transcript 선택 (mtime 최신 우선).
 
-    ① 마지막 사용자 요청 == prompt 인 파일. 없으면 ② 마지막 assistant 텍스트 == last_message 인 파일.
+    ① 마지막 사용자 요청 == prompt 인 파일 (Orca 가 prompt 를 ORCA_PROMPT_LIMIT 자에서 자르므로,
+    원문이 그 길이 이상이면 요청이 prompt 로 시작해도 일치). 없으면 ② 마지막 assistant 텍스트 == last_message.
     Orca prompt 는 같은 pane 의 하위 codex 입력으로 덮일 수 있어 ② 를 대체 키로 쓴다.
     ①② 가 모두 없고 sole_session(그 경로의 세션이 하나뿐)이면 ③ 읽기 가능한 최신 파일.
+    디렉토리 없음 → None. 일치가 없는데 읽기 실패가 있었으면 TranscriptReadError (기록 없음과 구분).
     """
     prompt_key = _normalized(prompt)
+    prompt_truncated = len(prompt or "") >= ORCA_PROMPT_LIMIT
     reply_key = _normalized(last_message)
     if not prompt_key and not reply_key and not sole_session:
         return None
     try:
         names = os.listdir(directory)
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError as error:
+        raise TranscriptReadError(f"transcript 디렉토리 읽기 실패 {directory}: {error}") from error
+    failures: list[str] = []
     candidates = []
     for name in names:
         path = os.path.join(directory, name)
         try:
             stat = os.stat(path)
-        except OSError:
+        except OSError as error:
+            if name.endswith(".jsonl"):
+                failures.append(f"{path}: {error}")
             continue
         if name.endswith(".jsonl"):
             candidates.append((stat.st_mtime_ns, path, stat))
@@ -1133,15 +1142,19 @@ def find_transcript(
     for _, path, stat in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
         try:
             request, reply = _MATCH_TEXTS.get(path, stat)
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as error:
+            failures.append(f"{path}: {error}")
             continue
-        if _texts_match(prompt_key, request):
+        if _texts_match(prompt_key, request, truncated=prompt_truncated):
             return path
         if reply_match is None and _texts_match(reply_key, reply):
             reply_match = path
         if newest_readable is None:
             newest_readable = path
-    return reply_match or (newest_readable if sole_session else None)
+    found = reply_match or (newest_readable if sole_session else None)
+    if found is None and failures:
+        raise TranscriptReadError(f"transcript 읽기 실패 {len(failures)}건 — " + "; ".join(failures[:3]))
+    return found
 
 
 def load_transcript(path: str) -> dict:
@@ -1221,7 +1234,8 @@ def session_detail(
         path = find_transcript(directory, prompt, last_message, sole_session=sole_session)
         transcript = load_transcript(path) if path is not None else None
     except (OSError, UnicodeDecodeError) as error:
-        return {**build_detail(session, None, now_ms=now_ms), "transcriptError": f"transcript 읽기 실패: {error}"}
+        message = str(error) if isinstance(error, TranscriptReadError) else f"transcript 읽기 실패: {error}"
+        return {**build_detail(session, None, now_ms=now_ms), "transcriptError": message}
     return build_detail(session, transcript, now_ms=now_ms)
 
 
