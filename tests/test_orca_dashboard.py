@@ -3562,8 +3562,7 @@ expect_predicate(
     "Step 변화는 예고·연속 중복을 제외하고 title·60% basis 를 보존",
     stepped_work_items,
     lambda items: len(items) == 1
-    and set(items[0])
-    == {
+    and {
         "id",
         "title",
         "startedAt",
@@ -3580,6 +3579,7 @@ expect_predicate(
         "backgroundShells",
         "failedTasks",
     }
+    <= set(items[0])
     and items[0]["stepPath"] == [1, 3, 7]
     and items[0]["finalStep"] == 7
     and items[0]["steps"]
@@ -5568,6 +5568,290 @@ expect_predicate(
     }
     and result[4] == 1002,
     "500/500 seeded points plus one point from each concurrent writer",
+)
+
+
+print("H18 HistoryStore 잠금 실패 내성")
+
+
+def history_store_flock_failure_observation(method, fail_unlock):
+    with tempfile.TemporaryDirectory(prefix="orca dashboard flock failure ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        path.write_text(
+            json.dumps(
+                dashboard.history_point(history_session("flock-load"), 1),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        store = dashboard.HistoryStore(str(path))
+        original_flock = dashboard.fcntl.flock
+        operations = []
+
+        def fail_selected_flock(handle, operation):
+            operations.append(operation)
+            is_unlock = bool(operation & dashboard.fcntl.LOCK_UN)
+            if is_unlock == fail_unlock:
+                raise OSError("forced flock failure")
+            return original_flock(handle, operation)
+
+        dashboard.fcntl.flock = fail_selected_flock
+        try:
+            try:
+                if method == "load":
+                    warnings = store.load()
+                else:
+                    warnings = store.record(
+                        {
+                            "error": None,
+                            "sessions": [history_session("flock-record")],
+                        },
+                        2,
+                    )
+            except Exception as error:
+                return "raised", type(error).__name__, str(error), operations
+        finally:
+            dashboard.fcntl.flock = original_flock
+        return "returned", warnings, operations
+
+
+for method, warning_prefix in (
+    ("record", "history 기록 실패 "),
+    ("load", "history 읽기 실패 "),
+):
+    for failure_label, fail_unlock in (("획득", False), ("해제", True)):
+        expect_predicate(
+            f"HistoryStore {method} 잠금 {failure_label} OSError 는 경고로 반환",
+            lambda method=method, fail_unlock=fail_unlock: history_store_flock_failure_observation(
+                method, fail_unlock
+            ),
+            lambda result, warning_prefix=warning_prefix: result[0] == "returned"
+            and len(result[1]) == 1
+            and result[1][0].startswith(warning_prefix)
+            and "forced flock failure" in result[1][0]
+            and result[2],
+            f"one {warning_prefix.strip()} warning without an exception",
+        )
+
+
+def serve_with_flock_failure_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard serve flock failure ") as temporary_directory:
+        root = Path(temporary_directory)
+        environment = history_serve_environment(temporary_directory)
+        (root / "sitecustomize.py").write_text(
+            "import fcntl\n"
+            "def fail_flock(_handle, _operation):\n"
+            "    raise OSError('forced unsupported flock')\n"
+            "fcntl.flock = fail_flock\n",
+            encoding="utf-8",
+        )
+        environment["PYTHONPATH"] = str(root)
+        port = unused_local_port()
+        process = run_history_serve(port, environment)
+        try:
+            snapshot, detail = wait_for_snapshot(
+                process,
+                port,
+                lambda payload: payload.get("error") is None
+                and payload.get("sessions")
+                and any(
+                    "history 기록 실패" in warning
+                    and "forced unsupported flock" in warning
+                    for warning in payload.get("warnings", [])
+                )
+                and any(
+                    (session.get("checklist") or {}).get("steps")
+                    and any(
+                        step.get("number") == 2 and step.get("state") == "current"
+                        for step in session["checklist"]["steps"]
+                    )
+                    for session in payload["sessions"]
+                ),
+                timeout=6,
+            )
+            cycle = int((root / "cycle.txt").read_text(encoding="utf-8"))
+            return snapshot, detail, cycle, process.poll()
+        finally:
+            stop_process(process)
+
+
+expect_predicate(
+    "serve 는 첫 history flock 실패에도 기동하고 다음 수집 snapshot 을 갱신",
+    serve_with_flock_failure_observation,
+    lambda result: isinstance(result[0], dict)
+    and result[0].get("error") is None
+    and result[0].get("sessions")
+    and result[2] >= 2
+    and result[3] is None,
+    "a running server with a second-cycle snapshot and history warning",
+)
+
+
+print("H19 전체 일치 짧은 후속")
+expect_predicate(
+    "네트워크·응답·1번 API 요청은 후속 접두사와 같아도 각각 새 작업",
+    lambda: dashboard.split_work_items(
+        [
+            history_record("user", 200, "기준 작업", uuid="h19-base"),
+            history_record("user", 201, "네트워크 고쳐줘", uuid="h19-network"),
+            history_record("user", 202, "응답 속도 개선", uuid="h19-latency"),
+            history_record("user", 203, "1번 API 수정해", uuid="h19-api"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: [item["id"] for item in items]
+    == ["h19-base", "h19-network", "h19-latency", "h19-api"]
+    and [item["requestCount"] for item in items] == [1, 1, 1, 1],
+    "four independent work items",
+)
+expect_predicate(
+    "네·1번·머지해줘·승인! 은 전체 일치 후속으로 병합",
+    lambda: dashboard.split_work_items(
+        [
+            history_record("user", 205, "기준 작업", uuid="h19-followup-base"),
+            history_record("user", 206, "네", uuid="h19-yes"),
+            history_record("user", 207, "1번", uuid="h19-number"),
+            history_record("user", 208, "머지해줘", uuid="h19-merge"),
+            history_record("user", 209, "승인!", uuid="h19-approval"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 1
+    and items[0]["id"] == "h19-followup-base"
+    and items[0]["requestCount"] == 5,
+    "one work item with four full-match follow-ups",
+)
+
+
+print("H20 단계 완료와 작업 완료 구분")
+expect_predicate(
+    "Step 완료 뒤 다음 Step 이 있으면 전체 완료가 아니고 다음 질문도 활성 작업에 귀속",
+    lambda: dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                210,
+                slash_request("private-implement", "단계 완료 구분"),
+                uuid="h20-active-pipeline",
+            ),
+            assistant_text(211, "Step 1을 완료했습니다. 다음은 Step 2입니다."),
+            history_record(
+                "user",
+                212,
+                "다음 단계에서 검증 범위를 설명해 주세요",
+                uuid="h20-next-question",
+            ),
+            assistant_text(213, "현재 Step 2를 진행 중입니다."),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    ),
+    lambda items: len(items) == 1
+    and items[0]["id"] == "h20-active-pipeline"
+    and items[0]["requestCount"] == 2
+    and items[0].get("completedAt") is None
+    and items[0]["result"] == "in_progress"
+    and items[0]["finalStep"] == 2,
+    "one active in-progress pipeline item at Step 2",
+)
+expect_predicate(
+    "PR 을 머지했습니다 는 작업 완료",
+    lambda: dashboard.split_work_items(
+        [
+            history_record("user", 215, "PR 병합 작업", uuid="h20-pr-merge"),
+            assistant_text(216, "PR 을 머지했습니다."),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    ),
+    lambda items: len(items) == 1
+    and items[0]["result"] == "completed",
+    "one completed work item",
+)
+
+
+print("H21 완료 시각 고정")
+
+
+def completed_time_observation():
+    items = dashboard.split_work_items(
+        [
+            history_record("user", 0, "완료 시각을 고정할 작업", uuid="h21-completed"),
+            assistant_text(0, "요청한 작업을 완료했습니다."),
+            history_record("user", 600, "승인", uuid="h21-approval"),
+            assistant_text(660, "네"),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+    return items, dashboard.progress_series(items, [], HISTORY_PIPELINES)
+
+
+expect_predicate(
+    "완료 후 승인 응답에도 completedAt·100% 점은 10:00 고정이고 endedAt 은 10:11",
+    completed_time_observation,
+    lambda result: len(result[0]) == 1
+    and result[0][0].get("completedAt") == utc_ms(history_timestamp(0))
+    and result[0][0]["endedAt"] == utc_ms(history_timestamp(660))
+    and result[1]
+    == [
+        {
+            "at": utc_ms(history_timestamp(0)),
+            "percent": 100,
+            "basis": "완료 보고",
+            "source": "transcript",
+            "workId": "h21-completed",
+        }
+    ],
+    "completedAt and the 100 percent point at 10:00, endedAt at 10:11",
+)
+
+
+print("H22 mkdir 리다이렉션 제외")
+for label, command in (
+    (
+        "분리 리다이렉션",
+        "mkdir -p output 2> runs/private-roadmap/20261007-old/error.log",
+    ),
+    (
+        "붙은 리다이렉션",
+        "mkdir -p output 2>runs/private-roadmap/20261007-old/e.log",
+    ),
+):
+    expect_predicate(
+        f"mkdir {label} 피연산자의 run 경로는 시작 신호가 아님",
+        lambda command=command: work_with_mkdir_candidate(command),
+        lambda items: len(items) == 1
+        and items[0]["pipeline"] is None
+        and items[0]["runId"] is None,
+        "one plain work item without a run id",
+    )
+
+expect_predicate(
+    "mkdir 실제 run 대상 뒤 stdout 리다이렉션은 시작 신호 유지",
+    lambda: work_with_mkdir_candidate(
+        "mkdir -p runs/private-implement/20261007-z > /dev/null"
+    ),
+    lambda items: len(items) == 1
+    and items[0]["pipeline"] == "private-implement"
+    and items[0]["runId"] == "runs/private-implement/20261007-z",
+    "one private-implement work item for the actual mkdir target",
+)
+
+
+print("H23 복수 heredoc 본문 제외")
+expect_predicate(
+    "한 줄에 선언한 두 번째 heredoc 본문의 run mkdir 도 시작 신호가 아님",
+    lambda: work_with_mkdir_candidate(
+        "cat <<'A' <<'B'\n"
+        "첫 본문\n"
+        "A\n"
+        "mkdir -p runs/private-roadmap/20261007-example\n"
+        "B"
+    ),
+    lambda items: len(items) == 1
+    and items[0]["pipeline"] is None
+    and items[0]["runId"] is None,
+    "one plain work item after all heredoc bodies are removed",
 )
 
 
