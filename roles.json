@@ -28,8 +28,10 @@
       "models": {
         "astra": { "id": "gpt-6-astra", "verified": true,
                    "_note": "codex exec 실호출로 확인 (2026-09-07). CLI 내장 카탈로그 등록 모델 — priority 1, minimal_client_version 0.153.0, context 272k/max 872k, effort low~ultra" },
+        "sol6":  { "id": "gpt-6-sol",     "verified": true,
+                   "_note": "codex exec 실호출로 확인 (2026-10-07, codex-cli 0.159.2). CLI 카탈로그 priority 3, context 272k, effort low~ultra. T1 전체를 5.6-sol 에서 상향" },
         "sol":   { "id": "gpt-5.6-sol",   "verified": true,
-                   "_note": "codex exec 실호출로 확인 (2026-08-13)" },
+                   "_note": "레거시 — 2026-10-07 T1 을 sol6(gpt-6-sol)로 상향. codex exec 실호출로 확인 (2026-08-13)" },
         "terra": { "id": "gpt-5.6-terra", "verified": true,
                    "_note": "~/.codex/config.toml 현재 기본값" },
         "luna":  { "id": "gpt-5.6-luna",  "verified": true,
@@ -42,7 +44,7 @@
       "_tier_axis_note": "codex 는 모델과 reasoning effort 두 손잡이를 함께 쓴다. 등급은 둘의 조합이다",
       "tiers": {
         "T0": { "model": "astra", "effort": "high" },
-        "T1": { "model": "sol",   "effort": "high" },
+        "T1": { "model": "sol6",  "effort": "high" },
         "T2": { "model": "terra", "effort": "medium" },
         "T3": { "model": "luna",  "effort": "low" }
       }
@@ -226,7 +228,8 @@
       "_doc": "작성자와 리뷰어를 다른 런타임에 둔다 — 문서는 codex 작성/claude 리뷰, 코드는 claude 작성/codex 리뷰. 같은 모델이 쓰고 검수하면 같은 맹점을 공유한다",
       "_default": { "runtime": "claude", "tier": "T2" },
 
-      "prd.author":      { "runtime": "codex",  "tier": "T2" },
+      "prd.author":      { "runtime": "codex",  "tier": "T1",
+                           "_note": "T2(terra) → T1(sol6) 상향 (2026-10-07). /private-roadmap 과제별 PRD 품질 — ADR 0002 조정 여지 반영" },
       "prd.review":      { "runtime": "claude", "tier": "T1" },
 
       "research.market": { "runtime": "claude", "tier": "T1" },
@@ -260,7 +263,7 @@
       "implement.redis":   { "runtime": "claude", "tier": "T3" },
 
       "review.code":     { "runtime": "codex",  "tier": "T0",
-                           "_trial": "gpt-6-astra 시범 배치 (2026-09-07). read-only·단발·L0 게이트라 오판이 파일을 오염시키지 않는다. 나머지 codex T1 노드는 sol 유지" },
+                           "_trial": "gpt-6-astra 시범 배치 (2026-09-07). read-only·단발·L0 게이트라 오판이 파일을 오염시키지 않는다. 나머지 codex T1 노드는 sol6(gpt-6-sol)" },
       "review.infra":    { "runtime": "codex",  "tier": "T0",
                            "_trial": "review.code 와 동일 — gpt-6-astra 시범 배치 (2026-09-07)" },
       "qa":              { "runtime": "claude", "tier": "T2" }

@@ -180,7 +180,7 @@ spec = h.build_node_spec(state, GRAPH, roles, "author")
 check("페르소나 파일 경로", spec["agent_file"].endswith("agents/private-prd-writer.md")
       and os.path.isfile(spec["agent_file"]), str(spec.get("agent_file")))
 check("런타임 해석", spec["runtime"] == "codex", str(spec.get("runtime")))
-check("모델 해석", spec["model"] == "gpt-5.6-terra", str(spec.get("model")))
+check("모델 해석", spec["model"] == "gpt-6-sol", str(spec.get("model")))
 check("접근 등급 투영 (codex → sandbox)", spec.get("sandbox") == "workspace-write", str(spec))
 check("codex 는 tools 미지원 → 제거", "tools" not in spec, str(spec))
 check("제거 사실 기록", any("tools" in n for n in spec.get("_dropped", [])),

@@ -58,6 +58,9 @@ print("\ncodex 카탈로그")
 astra = ((roles["runtimes"]["codex"].get("models") or {}).get("astra") or {})
 check("codex.models.astra 등록됨", astra.get("id") == "gpt-6-astra", repr(astra))
 check("astra 는 실호출로 검증됨(verified)", astra.get("verified") is True)
+sol6 = ((roles["runtimes"]["codex"].get("models") or {}).get("sol6") or {})
+check("codex.models.sol6 = gpt-6-sol", sol6.get("id") == "gpt-6-sol", repr(sol6))
+check("sol6 는 실호출로 검증됨(verified)", sol6.get("verified") is True)
 
 print("\n교차 리뷰 게이트 라우팅 (cross-review 프로파일)")
 for role in ("review.code", "review.infra"):
@@ -66,10 +69,13 @@ for role in ("review.code", "review.infra"):
     check(f"{role} → gpt-6-astra", (r or {}).get("model") == "gpt-6-astra", repr(r))
     check(f"{role} → effort=high", (r or {}).get("effort") == "high", repr(r))
 
-print("\n나머지 codex T1 노드는 그대로 sol 이다 (시범 배치 범위 격리)")
-for role in ("architect", "design.be", "design.fe", "design.db", "plan.coordinate"):
+print("\ncodex T1 노드 전체는 gpt-6-sol 이다 (T0 astra 시범 배치와 별개)")
+for role in ("architect", "design.be", "design.fe", "design.db", "plan.coordinate",
+             "prd.author", "research.cross", "idea.cross", "roadmap.author", "roadmap.split",
+             "analyze.cross", "test.red"):
     r = h.resolve_routing(roles, role, None, "cross-review")
-    check(f"{role} → gpt-5.6-sol", (r or {}).get("model") == "gpt-5.6-sol", repr(r))
+    check(f"{role} → gpt-6-sol", (r or {}).get("model") == "gpt-6-sol", repr(r))
+    check(f"{role} → effort=high", (r or {}).get("effort") == "high", repr(r))
 
 print("\nT0 바인딩이 lint 를 통과한다")
 for rt in ("codex", "claude"):
