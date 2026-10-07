@@ -142,7 +142,13 @@ gates = {
     "테스트 이의 반려 경로": r"테스트 이의",
     "결정적 게이트 (lint+test+build)": r"결정적 게이트",
     "리뷰 입력은 티켓+확정사항+diff": r"사용자 확정 사항",
-    "통과 기준 p0~p2 0건": r"p0~p2\s*0건",
+    "통과 기준 p0~p3 0건": r"통과 기준: p0~p3\s*0건",
+    "p3 는 REFACTOR 로만, 재작업 횟수 제외": r"p3.{0,80}재작업 횟수에 세지 않는다",
+    "리뷰 통과 SHA 기록": r"reviewed_sha",
+    "머지 단계는 사용자 확인 후": r"Step 9.{0,40}머지",
+    "머지 전 PR HEAD == reviewed_sha 확인": r"headRefOid",
+    "draft 해제 후 머지": r"gh pr ready",
+    "머지 토큰 p3-reflected": r"gh pr merge[^\n]*# p3-reflected",
     "재작업 루프 최대 2회": r"최대 2회",
     "draft PR": r"--draft",
     "실패 시에도 회고": r"실패.{0,40}회고|회고.{0,40}실패",
@@ -180,6 +186,23 @@ with tempfile.TemporaryDirectory() as tmp:
     check("프롬프트는 stdin 마커 `-` 로 받는다", argv[-1:] == ["-"], str(argv[-3:]))
     check("stdin 에 페르소나 frontmatter + 작업 지시", stdin.startswith("---") and "작업 지시" in stdin,
           stdin[:80])
+
+print("── /private-review 제거: 머지 게이트는 /private-implement·/private-feature 리뷰 루프가 소유 ──")
+
+check("skills/private-review 디렉토리 없음",
+      not os.path.exists(os.path.join(ROOT, "skills", "private-review")))
+stale = []
+for sub in ("agents", "skills", "rules", "hooks", "commands", "orchestration"):
+    for dirpath, _dirs, names in os.walk(os.path.join(ROOT, sub)):
+        for name in names:
+            path = os.path.join(dirpath, name)
+            try:
+                text = open(path, encoding="utf-8").read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if "/private-review" in text or "skills/private-review" in text:
+                stale.append(os.path.relpath(path, ROOT))
+check("하네스 정의에 /private-review 참조 0건", stale == [], str(stale))
 
 print("── 정적 lint 전체 (스킬·에이전트 섹션) ──")
 

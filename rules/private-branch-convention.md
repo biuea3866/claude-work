@@ -1,6 +1,14 @@
+---
+id: private-branch-convention
+title: [개인] 브랜치 전략 (trunk-based / origin/main 기준)
+scope: task
+level: MUST
+context: private
+---
+
 # [개인] 브랜치 전략 (trunk-based / origin/main 기준)
 
-개인 프로젝트 브랜치·머지 규칙. `private-be-implementer`·`private-fe-implementer`가 작업 기준으로, `private-senior-be`·`private-senior-fe`가 wave 지휘 기준으로, `/private-feature`·`/private-implement`·`/private-review` 스킬이 머지 기준으로 공통 참조한다 (SSOT).
+개인 프로젝트 브랜치·머지 규칙. `private-be-implementer`·`private-fe-implementer`가 작업 기준으로, `private-senior-be`·`private-senior-fe`가 wave 지휘 기준으로, `/private-feature`·`/private-implement` 스킬이 머지 기준으로 공통 참조한다 (SSOT).
 
 ## 원칙 — 숏텀 작업 브랜치 + main 머지
 

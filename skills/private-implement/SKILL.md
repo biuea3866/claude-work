@@ -1,6 +1,6 @@
 ---
 name: private-implement
-description: 개인 프로젝트 경량 파이프라인 — 설계 문서 없이 티켓·요구사항을 교차 런타임 TDD로 구현한다. 컨텍스트 이중 분석(A‖B) → RED(B) → GREEN/REFACTOR(A) → 결정적 게이트 → 교차 리뷰(B, 재작업 최대 2회) → draft PR → 회고. 작은 기능·버그 수정·단일 도메인 변경용. PRD·설계·티켓 분해가 필요한 본격 기능은 /private-feature.
+description: 개인 프로젝트 경량 파이프라인 — 설계 문서 없이 티켓·요구사항을 교차 런타임 TDD로 구현한다. 컨텍스트 이중 분석(A‖B) → RED(B) → GREEN/REFACTOR(A) → 결정적 게이트 → 교차 리뷰(B, 재작업 최대 2회, p0~p3 0건) → draft PR → 회고 → (사용자 확인 후) 머지. 작은 기능·버그 수정·단일 도메인 변경용. PRD·설계·티켓 분해가 필요한 본격 기능은 /private-feature.
 user-invocable: true
 requires: L1
 roles: [analyze.context, analyze.cross, test.red, implement.be, implement.fe, implement.mysql, implement.mongodb, implement.kafka, implement.redis, review.code, review.infra]
@@ -98,9 +98,9 @@ LLM 리뷰 전에 기계 판정만으로 거른다. 레포의 lint·test·build 
 
 - **role `review.code`** — 새 세션. 입력은 **티켓·요구사항 + `context.md` 의 사용자 확정 사항 섹션만 + `origin/main...HEAD` diff**. A 의 분석 문서(`analysis-A.md`)와 `context.md` 전문은 주지 않는다 — 독립 해석이 리뷰의 가치다. 사용자 확정 사항만 주는 이유는 이미 결정된 것을 다시 다투지 않게 하기 위해서다.
 - 리뷰어에게 p0~p5 와 별도로 **"해석 차이"** 섹션을 요구한다 (Step 1 의 3유형으로 분류).
-- 산출: `review-<n>.md`.
+- 산출: `review-<n>.md`. 메인 세션이 첫 줄에 리뷰한 커밋을 기록한다: `reviewed_sha: <git -C <worktree> rev-parse HEAD>` — Step 9 머지 게이트의 근거다.
 
-**통과 기준: p0~p2 0건.** p3 이하는 PR 본문에 남긴다.
+**통과 기준: p0~p3 0건.** p4·p5 는 PR 본문에 남긴다. 이 기준이 머지 게이트(`private-auto-merge-gate.sh`, p0~p3 반영)와 같아서, 통과한 PR 은 재리뷰 없이 머지할 수 있다.
 
 지적 라우팅:
 
@@ -109,10 +109,11 @@ LLM 리뷰 전에 기계 판정만으로 거른다. 레포의 lint·test·build 
 | 동작·스펙 결함 | Step 3 (재현 테스트 추가) → 4 → 5 → 6 | 추가만 |
 | 테스트 자체 결함 (구현 상세 의존) | Step 3 → 4 → 5 → 6 | 수정 허용, 사유 기록 |
 | 설계·레이어·컨벤션 위반, 품질(p2) | Step 4 (REFACTOR) → 5 → 6 | 변경 금지 |
+| nit(p3)만 남음 | Step 4 (REFACTOR) → 5 → 6 | 테스트 품질 지적이면 수정 허용, 사유 기록 |
 | 해석 차이 — 사용자 확정 사항과 충돌 | 확정 사항 우선, 지적 기각 + 기록 | — |
 | 해석 차이 — 새 해석 문제 | 사용자 게이트 | — |
 
-- **재작업은 최대 2회**다 (리뷰 최대 3회). 3번째 리뷰에도 p0~p2 가 남으면 멈추고 사용자에게 에스컬레이션한 뒤 Step 8 로 간다 (실패 회고).
+- **재작업은 최대 2회**다 (리뷰 최대 3회). 지적이 p3 뿐인 회차의 반영은 재작업 횟수에 세지 않는다 — 단 p3 만으로 2회 연속 돌면 멈추고 사용자에게 남길지 묻는다. 3번째 리뷰에도 p0~p2 가 남으면 멈추고 사용자에게 에스컬레이션한 뒤 Step 8 로 간다 (실패 회고).
 - 진동 감지: 같은 파일·라인에 상반된 지적이 2회 나오면 횟수와 무관하게 멈추고 사용자에게 판정을 요청한다.
 
 ## Step 7 — draft PR
@@ -125,7 +126,8 @@ gh pr create --draft --base main --title "[<티켓ID|NO-TICKET>] - <type> : <제
 ```
 
 - `# tests-passed` 는 Step 5 의 exit 0 raw 출력이 있을 때만 붙인다 — 없으면 거짓 단언이다.
-- 본문 "검증"에 Step 5 결과, "추가 유의사항"에 잔여 p3~p4 와 교차 리뷰 회차를 적는다.
+- 본문 "검증"에 Step 5 결과, "추가 유의사항"에 잔여 p4·p5 와 교차 리뷰 회차를 적는다.
+- PR URL 을 `<run-dir>/pr.txt` 에 저장한다 — Step 9 가 run 디렉토리를 찾는 키다.
 
 ## Step 8 — 회고 (통과·실패 모두)
 
@@ -140,6 +142,27 @@ gh pr create --draft --base main --title "[<티켓ID|NO-TICKET>] - <type> : <제
 3. **2회 이상 반복된 태그만** 스킬·에이전트 수정 제안으로 올린다 — `~/.harness/skills/learned/<YYYYMMDD>-<태그>.md` 에 근거 run 목록 + 수정안. 1회성은 기록만 한다.
 4. 제안은 **사용자 승인 후에만** 반영한다. 반영은 대상 레포 PR 과 섞지 않고 `~/.harness` 에서 별도로 한다 (규칙 원본은 `~/.harness`, 생성물 직접 수정 금지).
 
+
+## Step 9 — 머지 (사용자 확인 후)
+
+draft PR 을 사용자가 확인하고 머지를 지시했을 때만 수행한다. 새 세션이면 `grep -l <PR URL> ~/.harness/runs/private-implement/*/pr.txt` 로 run 디렉토리를 찾는다. 별도 리뷰 스킬을 거치지 않는다 — Step 6 통과가 머지 게이트다.
+
+1. 마지막 `review-<n>.md` 가 통과(p0~p3 0건)인지, 그 `reviewed_sha` 가 PR HEAD 와 같은지 확인한다:
+
+```bash
+gh pr view <PR> --json headRefOid,isDraft -q .headRefOid   # reviewed_sha 와 같아야 한다
+```
+
+2. 다르면 리뷰 이후 검증되지 않은 커밋이 있는 것이다. 머지하지 않고 Step 5 → 6 을 다시 돈다 (재작업 횟수와 별개).
+3. 같으면 draft 를 해제하고 머지한다. 토큰의 근거는 `review-<n>.md` 다 — 근거 없이 붙이면 거짓 단언이다.
+
+```bash
+gh pr ready <PR>
+gh pr merge <PR> --squash --delete-branch   # p3-reflected
+```
+
+4. 머지 raw 출력을 `retro.md` 끝에 덧붙이고 worktree 를 정리한다 (`git worktree remove <worktree>`).
+
 ## 보고
 
 > 완료 단언은 `rules/COMPLETION-RULE.md` §1~4를 모두 충족해야 한다.
@@ -151,7 +174,8 @@ gh pr create --draft --base main --title "[<티켓ID|NO-TICKET>] - <type> : <제
 - 분석 차이: 사실 {n} · 설계 {n} · 해석 {n} (사용자 게이트 {n}회)
 - RED: {RED_SHA}, 테스트 이의 {n}회
 - 결정적 게이트: {명령 + exit code raw 출력}
-- 리뷰: {회차}회, 최종 verdict {..}, 잔여 p3~p4 {n}건
+- 리뷰: {회차}회, 최종 verdict {..}, reviewed_sha {sha}, 잔여 p4·p5 {n}건
 - draft PR: {URL}
+- 머지: {대기 (사용자 확인 필요) | squash 머지 raw 출력}
 - 회고: {retro.md 경로}, 스킬 수정 제안 {있음/없음}
 ```

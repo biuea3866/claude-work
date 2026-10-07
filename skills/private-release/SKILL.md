@@ -2,6 +2,8 @@
 name: private-release
 description: 개인 프로젝트 prod 릴리즈 — private-qa로 배포 가부를 조사하고, PASS면 YYYYMMDD-NN 태그를 따서 prod 프로필로 배포한다. QA FAIL이면 배포 불가. 인수로 대상 기능/앱 카테고리를 받는다(없으면 현재 브랜치 기준).
 user-invocable: true
+requires: L1
+roles: [qa, implement.be, implement.fe]
 ---
 
 릴리즈 대상: $ARGUMENTS  (기능명·앱 카테고리 / 비어있으면 현재 브랜치·레포 기준)
@@ -12,9 +14,20 @@ user-invocable: true
 당일 기존 릴리즈 태그: !`git tag -l "$(date +%Y%m%d)-*" 2>/dev/null | sort || echo "(없음)"`
 prod compose 파일: !`ls -1 docker-compose.prod.yml docker-compose.prod.yaml 2>/dev/null || echo "(루트에 없음 — --profile prod 사용 여부 확인)"`
 
+라우팅 (roles.json active_profile 해석):
+!`~/.harness/bin/harness role --compact qa implement.be implement.fe`
+
 ---
 
-개인 프로젝트 전용 prod 릴리즈 진입점. 마커가 없으면 회사용 배포 절차를 안내하고 중단한다.
+## 실행 규약
+
+단계는 **role** 로만 지정한다. 구체 agent·모델·런타임은 `roles.json` 이 정한다 — 스킬에 하드코딩하지 않는다.
+
+- 위 라우팅 표의 `invoke` 를 **그대로** 실행한다. `claude/*` 는 `Agent(...)`, `codex/*` 는 Bash 로 `codex exec`(페르소나를 stdin 으로 주입).
+- `codex exec` 는 별도 세션이라 컨텍스트를 물려받지 않는다 — **입력·산출 경로와 계약을 프롬프트에 전부 적고**, 산출물은 파일로 받는다.
+- codex 는 서브에이전트를 스폰할 수 없다(L1) — 병렬은 메인 세션이 소유한다.
+
+개인 프로젝트 전용 prod 릴리즈 진입점. 마커가 없으면 그 사실을 안내하고 중단한다 (마커: `.claude/private-project`).
 
 배포 규칙 SSOT: `~/.claude/rules/private-deploy-convention.md`. 이 스킬은 그 규칙의 실행 절차다.
 
@@ -23,12 +36,12 @@ prod compose 파일: !`ls -1 docker-compose.prod.yml docker-compose.prod.yaml 2>
 ## Step 1 — 사전 확인
 
 1. 마커가 없으면 중단하고 안내한다.
-2. prod 배포 대상은 **`main`에 머지되어 dev 환경에 배포된 것**이다. `main` 미반영이면 릴리즈 대상이 아니므로 중단하고 main 반영(`/private-review` 머지 → dev 환경 배포)을 먼저 안내한다.
+2. prod 배포 대상은 **`main`에 머지되어 dev 환경에 배포된 것**이다. `main` 미반영이면 릴리즈 대상이 아니므로 중단하고 main 반영(`/private-implement` Step 9 또는 `/private-feature` 리뷰·머지 → dev 환경 배포)을 먼저 안내한다.
 3. prod compose 식별자를 확정한다: `docker-compose.prod.yml`(표준) 또는 `--profile prod`. 둘 다 없으면 사용자에게 확인하고 중단한다 (임의로 dev compose를 prod로 쓰지 않는다).
 
 ## Step 2 — QA 게이트 (배포 가부 조사)
 
-`Agent(private-qa)` — 릴리즈 대상 기능을 dev에서 실구동 E2E(신규 시나리오 + 회귀 카탈로그 전체)로 검증한다.
+**role `qa`** — 릴리즈 대상 기능을 dev에서 실구동 E2E(신규 시나리오 + 회귀 카탈로그 전체)로 검증한다.
 
 - **verdict FAIL** → 릴리즈 중단. 버그·회귀 항목을 그대로 보고하고, 담당 implementer 수정 → dev 재배포 → **QA 전체 재실행**을 안내한다. 부분 재검증으로 배포를 진행하지 않는다.
 - **verdict PASS** → Step 3으로. QA 리포트 경로와 **직전 prod 이미지 태그**(롤백 지점)를 확보한다.

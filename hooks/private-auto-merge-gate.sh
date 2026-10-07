@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # PreToolUse hook (Bash matcher) — [개인 프로젝트 전용] PR 자동머지 게이트.
-# 정책: private-code-reviewer 의 p0~p3 지적이 전부 코드에 반영 확인되면 PR 을 자동머지한다.
-#       반영 확인의 실행 주체는 private-code-reviewer(재리뷰) — 이 hook 은
-#       "반영 확인 없는 머지"를 차단하는 게이트다.
+# 정책: 리뷰(role review.code)가 p0~p3 0건을 확인했고 그 리뷰 커밋이 PR HEAD 와 같으면 머지한다.
+#       확인의 근거는 /private-implement 의 review-<n>.md(reviewed_sha) — 이 hook 은
+#       "확인 없는 머지"를 차단하는 게이트다.
 #
 #   - `gh pr merge` 에 `# p3-reflected` 토큰이 없으면 exit 2 로 차단.
 #   - 재리뷰에서 p0~p3 전부 반영 확인(잔여 지적이 p4/p5 뿐) 시 토큰을 붙여 재호출 → 통과.
@@ -31,10 +31,10 @@ is_private_project "$hook_cwd" || exit 0
 cat >&2 <<'EOF'
 🛑 [private] PR 머지 차단 — 리뷰 지적(p0~p3) 반영 확인이 선행되지 않았습니다.
 
-자동머지 조건: private-code-reviewer 의 p0~p3 지적이 전부 코드에 반영돼야 합니다.
+머지 조건: 리뷰의 p0~p3 지적이 0건이고, 그 리뷰가 현재 PR HEAD 를 대상으로 했어야 합니다.
 
-1) private-code-reviewer 로 재리뷰를 수행하세요 — 이전 리뷰의 p0~p3 지적 각각이
-   실제 diff 에 반영됐는지 확인 (verdict 가 APPROVED 이거나 잔여 지적이 p4/p5 뿐이어야 함).
+1) 마지막 리뷰(role review.code)가 p0~p3 0건인지, 그 reviewed_sha 가 PR HEAD 와 같은지 확인하세요
+   (/private-implement Step 9). 리뷰 이후 커밋이 있으면 리뷰를 다시 받아야 합니다.
 2) 전부 반영 확인되면 머지 명령 끝에 토큰을 붙여 재호출하세요:
    gh pr merge <번호> --squash --auto   # p3-reflected
 
