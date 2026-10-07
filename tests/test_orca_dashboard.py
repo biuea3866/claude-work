@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import socket
@@ -311,6 +312,36 @@ expect_equal(
     lambda: dashboard.parse_step_headings(roadmap_markdown),
     ROADMAP_STEPS,
 )
+
+print("parse_step_titles")
+expect_equal(
+    "Step 제목의 em dash 구분자 제거",
+    lambda: dashboard.parse_step_titles("## Step 4 — 로드맵"),
+    {4: "로드맵"},
+)
+expect_equal(
+    "Step 제목의 colon 구분자 제거",
+    lambda: dashboard.parse_step_titles("## Step 2: RED 테스트"),
+    {2: "RED 테스트"},
+)
+expect_equal(
+    "구분자 없는 Step 제목 추출",
+    lambda: dashboard.parse_step_titles("## Step 6 구현"),
+    {6: "구현"},
+)
+expect_equal(
+    "제목 없는 Step 은 빈 문자열",
+    lambda: dashboard.parse_step_titles("## Step 3"),
+    {3: ""},
+)
+expect_equal(
+    "중복 Step 번호는 첫 헤딩 제목 우선",
+    lambda: dashboard.parse_step_titles(
+        "## Step 1 - 첫 제목\n## Step 1 – 나중 제목\n### Step 2 — 제외"
+    ),
+    {1: "첫 제목"},
+)
+
 expect_equal(
     "코멘트 진행 70% 최우선",
     lambda: progress_result(
@@ -399,6 +430,87 @@ expect_equal(
     "진행 근거가 없으면 산정 불가",
     lambda: progress_result(texts=["작업 중"]),
     {"percent": None, "basis": "산정 불가"},
+)
+
+print("pipeline_checklist")
+roadmap_titles = {
+    number: f"단계 {number}" for number in ROADMAP_STEPS
+}
+expect_equal(
+    "Step 6/9 체크리스트는 done 6개·current 1개·pending 2개와 제목",
+    lambda: dashboard.pipeline_checklist(
+        agent_state="working",
+        texts=["/private-roadmap Step 6 진행 중"],
+        pipelines=PIPELINES,
+        step_titles={"private-roadmap": roadmap_titles},
+    ),
+    {
+        "pipeline": "private-roadmap",
+        "steps": [
+            {
+                "number": number,
+                "title": f"단계 {number}",
+                "state": "done" if number < 6 else "current" if number == 6 else "pending",
+            }
+            for number in ROADMAP_STEPS
+        ],
+    },
+)
+expect_equal(
+    "체크리스트 현재 Step 판정은 예고 문장의 Step 을 제외",
+    lambda: dashboard.pipeline_checklist(
+        agent_state="working",
+        texts=[
+            "/private-roadmap 현재 Step 4 진행 중입니다. Step 8은 다음 단계입니다."
+        ],
+        pipelines=PIPELINES,
+        step_titles={"private-roadmap": roadmap_titles},
+    )["steps"][4]["state"],
+    "current",
+)
+expect_equal(
+    "파이프라인을 탐지하지 못하면 체크리스트 없음",
+    lambda: dashboard.pipeline_checklist(
+        agent_state="working",
+        texts=["Step 4 진행 중"],
+        pipelines=PIPELINES,
+    ),
+    None,
+)
+expect_equal(
+    "현재 Step 이 파이프라인 목록에 없으면 체크리스트 없음",
+    lambda: dashboard.pipeline_checklist(
+        agent_state="working",
+        texts=["/private-roadmap Step 12 진행 중"],
+        pipelines=PIPELINES,
+    ),
+    None,
+)
+expect_predicate(
+    "done + 완료 보고면 체크리스트 전 단계 done",
+    lambda: dashboard.pipeline_checklist(
+        agent_state="done",
+        texts=[
+            "/private-roadmap Step 6 검증 결과입니다.\n모든 작업을 완료했습니다."
+        ],
+        pipelines=PIPELINES,
+        step_titles={"private-roadmap": roadmap_titles},
+    ),
+    lambda value: value is not None
+    and len(value["steps"]) == 9
+    and all(step["state"] == "done" for step in value["steps"]),
+    "nine done steps",
+)
+expect_predicate(
+    "step_titles 미전달 시 모든 제목은 빈 문자열",
+    lambda: dashboard.pipeline_checklist(
+        agent_state="working",
+        texts=["/private-roadmap Step 0 진행 중"],
+        pipelines=PIPELINES,
+    ),
+    lambda value: value is not None
+    and all(step["title"] == "" for step in value["steps"]),
+    "all titles empty",
 )
 
 print("classify_status")
@@ -814,6 +926,49 @@ expect_equal(
     },
 )
 
+checklist_worktree = worktree(
+    "wt-checklist",
+    agents=[
+        agent(
+            "tab-checklist:leaf",
+            state="working",
+            mainAgent={"state": "working"},
+            prompt="/private-roadmap Step 6 진행 중",
+        )
+    ],
+    liveTerminalCount=1,
+)
+checklist_terminal = terminal(
+    "term-checklist", "wt-checklist", "tab-checklist", "leaf"
+)
+expect_predicate(
+    "build_snapshot 세션은 근거가 있으면 checklist 를 포함",
+    lambda: dashboard.build_snapshot(
+        [checklist_worktree],
+        [checklist_terminal],
+        {"term-checklist": []},
+        now_ms=NOW_MS,
+        pipelines=PIPELINES,
+        step_titles={"private-roadmap": roadmap_titles},
+    )["sessions"][0]["checklist"],
+    lambda value: value is not None
+    and value["pipeline"] == "private-roadmap"
+    and value["steps"][6]
+    == {"number": 6, "title": "단계 6", "state": "current"},
+    "private-roadmap checklist with Step 6 current",
+)
+expect_equal(
+    "build_snapshot 은 step_titles 미전달·근거 없음에도 checklist None 포함",
+    lambda: dashboard.build_snapshot(
+        [worktree("wt-no-checklist", agents=[agent("tab-none:leaf")])],
+        [],
+        {},
+        now_ms=NOW_MS,
+        pipelines=PIPELINES,
+    )["sessions"][0]["checklist"],
+    None,
+)
+
 print("orca_command")
 expect_equal(
     "ORCA_CLI_COMMAND 는 shlex.split",
@@ -854,6 +1009,54 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard skill read ") as tempora
         ),
         load_pipelines_error
         or f"pipelines={loaded_pipelines!r}, warnings={pipeline_warnings!r}",
+    )
+
+print("load_step_titles 읽기 실패")
+with tempfile.TemporaryDirectory(prefix="orca dashboard step titles ") as temporary_directory:
+    skills_directory = Path(temporary_directory) / "skills"
+    alpha_skill = skills_directory / "private-alpha" / "SKILL.md"
+    beta_skill = skills_directory / "private-beta" / "SKILL.md"
+    no_steps_skill = skills_directory / "private-no-steps" / "SKILL.md"
+    unreadable_skill = skills_directory / "private-unreadable" / "SKILL.md"
+    for skill_file in (alpha_skill, beta_skill, no_steps_skill, unreadable_skill):
+        skill_file.parent.mkdir(parents=True)
+    alpha_skill.write_text(
+        "# Alpha\n\n## Step 0 — 준비\n\n## Step 1: 검증\n",
+        encoding="utf-8",
+    )
+    beta_skill.write_text(
+        "# Beta\n\n## Step 2 구현\n\n## Step 3\n",
+        encoding="utf-8",
+    )
+    no_steps_skill.write_text("# No steps\n", encoding="utf-8")
+    unreadable_skill.write_text(
+        "# Unreadable\n\n## Step 9 — 비밀\n", encoding="utf-8"
+    )
+    unreadable_skill.chmod(0o000)
+    title_warnings = []
+    try:
+        loaded_titles = dashboard.load_step_titles(
+            str(skills_directory), title_warnings
+        )
+        load_titles_error = ""
+    except Exception as error:
+        loaded_titles = None
+        load_titles_error = f"{type(error).__name__}: {error}"
+    finally:
+        unreadable_skill.chmod(0o600)
+    check(
+        "정상 스킬 2개 제목만 반환하고 읽기 실패 warning 1줄",
+        loaded_titles
+        == {
+            "private-alpha": {0: "준비", 1: "검증"},
+            "private-beta": {2: "구현", 3: ""},
+        }
+        and len(title_warnings) == 1
+        and title_warnings[0].startswith(
+            f"SKILL.md 읽기 실패 {unreadable_skill}: "
+        ),
+        load_titles_error
+        or f"titles={loaded_titles!r}, warnings={title_warnings!r}",
     )
 
 print("run_orca 실행 실패")
@@ -1179,6 +1382,25 @@ def wait_for_snapshot(process, port, predicate, timeout):
     return None, last_detail
 
 
+def has_checklist_ui_contract(html):
+    dark_marker = "@media (prefers-color-scheme: dark)"
+    if dark_marker not in html:
+        return False
+    light_css, dark_css = html.split(dark_marker, 1)
+    for state in ("done", "current", "pending"):
+        token_pattern = re.compile(
+            rf"--[a-z0-9-]*{state}[a-z0-9-]*\s*:", re.IGNORECASE
+        )
+        if not token_pattern.search(light_css) or not token_pattern.search(dark_css):
+            return False
+    return (
+        "checklist" in html.lower()
+        and all(label in html for label in ("완료", "진행 중", "남음", "Step "))
+        and all(symbol in html for symbol in ("✔", "▶", "○"))
+        and "textContent" in html
+    )
+
+
 print("serve")
 with tempfile.TemporaryDirectory(prefix="orca dashboard serve ") as temporary_directory:
     serve_env = fixture_environment(temporary_directory)
@@ -1250,6 +1472,11 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard serve ") as temporary_di
             and root_headers.get_content_type() == "text/html"
             and "prefers-color-scheme" in root_body,
             f"status={root_status}, headers={dict(root_headers)}, body={root_body[:500]!r}",
+        )
+        check(
+            "/ HTML 은 checklist 렌더 코드와 state 별 라이트·다크 토큰 포함",
+            root_status == 200 and has_checklist_ui_contract(root_body),
+            f"status={root_status}, checklist UI contract missing",
         )
         check("알 수 없는 HTTP 경로는 404", responses["missing"][0] == 404)
 
