@@ -1838,6 +1838,77 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard continuation transcript 
     )
 
 
+def r25_prompt_match(transcript_text, orca_text):
+    with tempfile.TemporaryDirectory(prefix="orca dashboard r25 prompt ") as temporary_directory:
+        transcript_path = Path(temporary_directory) / "prompt.jsonl"
+        write_transcript(transcript_path, transcript_text)
+        return dashboard.find_transcript(temporary_directory, orca_text) == str(
+            transcript_path
+        )
+
+
+def r25_assistant_match(transcript_text, orca_text):
+    with tempfile.TemporaryDirectory(prefix="orca dashboard r25 assistant ") as temporary_directory:
+        transcript_path = Path(temporary_directory) / "assistant.jsonl"
+        transcript_path.write_text(
+            transcript_record(
+                "user", "2026-10-07T09:00:00.000Z", "일치하지 않는 사용자 요청"
+            )
+            + "\n"
+            + transcript_record(
+                "assistant",
+                "2026-10-07T09:00:01.000Z",
+                [{"type": "text", "text": transcript_text}],
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return dashboard.find_transcript(
+            temporary_directory, "일치하지 않는 Orca prompt", orca_text
+        ) == str(transcript_path)
+
+
+print("find_transcript 전체 일치와 잘린 Orca 텍스트")
+R25_PREFIX_60 = "가" * 60
+R25_PREFIX_59 = "나" * 59
+for match_source, match_fixture in (
+    ("① 사용자 요청", r25_prompt_match),
+    ("② assistant 응답", r25_assistant_match),
+):
+    expect_equal(
+        f"{match_source}은 앞 60자가 같아도 뒷부분이 다르면 불일치",
+        lambda match_fixture=match_fixture: match_fixture(
+            R25_PREFIX_60 + " transcript 뒷부분",
+            R25_PREFIX_60 + " Orca 뒷부분",
+        ),
+        False,
+    )
+    expect_equal(
+        f"{match_source}은 공백 정규화 후 전체가 같으면 일치",
+        lambda match_fixture=match_fixture: match_fixture(
+            R25_PREFIX_60 + "   같은\n전체 텍스트",
+            R25_PREFIX_60 + " 같은 전체 텍스트",
+        ),
+        True,
+    )
+    expect_equal(
+        f"{match_source}은 Orca 쪽이 60자 이상 접두사로 잘리면 일치",
+        lambda match_fixture=match_fixture: match_fixture(
+            R25_PREFIX_60 + " transcript 에만 남은 뒷부분",
+            R25_PREFIX_60,
+        ),
+        True,
+    )
+    expect_equal(
+        f"{match_source}은 Orca 쪽 잘린 접두사가 60자 미만이면 불일치",
+        lambda match_fixture=match_fixture: match_fixture(
+            R25_PREFIX_59 + " transcript 에만 남은 뒷부분",
+            R25_PREFIX_59,
+        ),
+        False,
+    )
+
+
 from datetime import datetime
 
 
@@ -2354,6 +2425,24 @@ expect_equal(
     },
 )
 expect_equal(
+    "agents main state 는 agentState working 보다 mainState done 을 우선",
+    lambda: dashboard.build_detail(
+        {**DETAIL_SESSION, "agentState": "working", "mainState": "done"},
+        DETAIL_TRANSCRIPT,
+        now_ms=NOW_MS,
+    )["agents"]["main"]["state"],
+    "done",
+)
+expect_equal(
+    "agents mainState 가 None 이면 agentState 로 대체",
+    lambda: dashboard.build_detail(
+        {**DETAIL_SESSION, "agentState": "working", "mainState": None},
+        DETAIL_TRANSCRIPT,
+        now_ms=NOW_MS,
+    )["agents"]["main"]["state"],
+    "working",
+)
+expect_equal(
     "timeline 은 kind·문구를 시간순으로 조립",
     lambda: built_detail()["timeline"],
     [
@@ -2808,6 +2897,311 @@ check(
     and unique_terminal_detail.get("transcript") is True,
     unique_terminal_error,
 )
+
+
+NODE_UI_HARNESS = r"""
+class StubNode {
+  constructor(tagName, ownerDocument) {
+    this.tagName = tagName;
+    this.ownerDocument = ownerDocument;
+    this.children = [];
+    this.parentNode = null;
+    this.attributes = {};
+    this.dataset = {};
+    this.style = {};
+    this.className = "";
+    this.hidden = false;
+    this.listeners = {};
+    this._text = "";
+    this.classList = {
+      toggle: (name, enabled) => {
+        const names = new Set(this.className.split(/\s+/).filter(Boolean));
+        if (enabled) names.add(name); else names.delete(name);
+        this.className = [...names].join(" ");
+      },
+    };
+  }
+  set textContent(value) {
+    this._text = value === null || value === undefined ? "" : String(value);
+    this.children = [];
+  }
+  get textContent() {
+    return this._text + this.children.map((child) => child.textContent).join("");
+  }
+  setAttribute(name, value) {
+    const text = String(value);
+    this.attributes[name] = text;
+    if (name === "class") this.className = text;
+    if (name === "id") {
+      this.id = text;
+      this.ownerDocument.nodesById.set(text, this);
+    }
+    if (name.startsWith("data-")) {
+      const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      this.dataset[key] = text;
+    }
+  }
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  replaceChildren(...children) {
+    this._text = "";
+    this.children = [];
+    for (const child of children) this.appendChild(child);
+  }
+  addEventListener(type, listener) {
+    (this.listeners[type] ||= []).push(listener);
+  }
+  dispatchEvent(event) {
+    event.target = this;
+    event.currentTarget = this;
+    if (!event.preventDefault) event.preventDefault = () => {};
+    for (const listener of this.listeners[event.type] || []) listener(event);
+    return true;
+  }
+}
+
+class StubDocument {
+  constructor() {
+    this.nodesById = new Map();
+    this.body = new StubNode("body", this);
+    this.title = "Orca 세션 대시보드";
+  }
+  createElement(tagName) { return new StubNode(tagName, this); }
+  createElementNS(_namespace, tagName) { return new StubNode(tagName, this); }
+  createTextNode(text) {
+    const node = new StubNode("#text", this);
+    node.textContent = text;
+    return node;
+  }
+  getElementById(id) { return this.nodesById.get(id) || null; }
+  querySelectorAll(selector) {
+    const key = selector === "[data-ago]" ? "ago" : selector === "[data-since]" ? "since" : null;
+    if (!key) return [];
+    const matches = [];
+    const visit = (node) => {
+      if (Object.prototype.hasOwnProperty.call(node.dataset, key)) matches.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this.body);
+    return matches;
+  }
+}
+
+const document = new StubDocument();
+function staticNode(id, parent) {
+  const node = document.createElement(id === "back" ? "button" : "div");
+  node.setAttribute("id", id);
+  (parent || document.body).appendChild(node);
+  return node;
+}
+const listView = staticNode("list-view");
+const detailView = staticNode("detail-view");
+detailView.hidden = true;
+for (const id of ["updated", "banner"]) staticNode(id);
+for (const id of ["kpi-total", "kpi-running", "kpi-waiting", "kpi-blocked", "cards",
+  "shell-only-title", "shell-only-list", "no-terminal-title", "no-terminal-list"]) staticNode(id, listView);
+staticNode("back", detailView);
+staticNode("detail-body", detailView);
+
+const windowListeners = {};
+const window = {
+  addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
+  dispatchEvent(event) {
+    for (const listener of windowListeners[event.type] || []) listener(event);
+  },
+  scrollTo() {},
+};
+let currentHash = "";
+const location = {
+  get hash() { return currentHash; },
+  set hash(value) {
+    const next = value ? (String(value).startsWith("#") ? String(value) : "#" + value) : "";
+    if (next === currentHash) return;
+    currentHash = next;
+    queueMicrotask(() => window.dispatchEvent({type: "hashchange"}));
+  },
+};
+const history = {length: 2, back() { location.hash = ""; }};
+window.document = document;
+window.location = location;
+window.history = history;
+globalThis.document = document;
+globalThis.window = window;
+globalThis.location = location;
+globalThis.history = history;
+
+const scheduledTimers = [];
+globalThis.setInterval = () => 1;
+globalThis.setTimeout = (callback) => { scheduledTimers.push(callback); return scheduledTimers.length; };
+
+function session(id, name) {
+  return {
+    id, name, repo: "acme/dashboard", branch: "feat/ui", path: "/tmp/ui", kind: "agent",
+    agentType: "claude", agentState: "done", mainState: "done", toolName: "Agent",
+    status: "idle", reason: "응답 완료 — 다음 지시 대기", summary: {text: name + " 요약", source: "lastMessage"},
+    progress: {percent: 50, basis: "테스트 진행률"}, checklist: null,
+    lastOutputAt: 1900000, pr: null,
+  };
+}
+const sessions = [session("A", "세션 A"), session("B", "세션 B"), session("C", "세션 C")];
+const snapshotPayload = {
+  generatedAt: 2000000, lastSuccessAt: 2000000, interval: 3, error: null, warnings: [],
+  kpi: {total: 3, running: 0, waitingUser: 0, blockedOrStale: 0},
+  sessions, shellOnly: [], noTerminal: [],
+};
+function detailPayload(id) {
+  const selected = sessions.find((item) => item.id === id);
+  return {
+    session: selected,
+    agents: {main: {name: selected.name, agentType: "claude", state: "done", toolName: "Agent"}, children: []},
+    timeline: [], blockers: [], transcript: false,
+  };
+}
+function response(payload, status = 200, textPromise = null, jsonPromise = null) {
+  const serialized = JSON.stringify(payload);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: () => textPromise || Promise.resolve(serialized),
+    json: () => jsonPromise || Promise.resolve(payload),
+  };
+}
+
+let fetchMode = "normal";
+let delayedAResolve = null;
+let failCOnce = false;
+let cFailures = 0;
+globalThis.fetch = async (url) => {
+  if (url === "/api/snapshot") return response(snapshotPayload);
+  const match = /^\/api\/session\?id=(.*)$/.exec(url);
+  if (!match) throw new Error("unexpected fetch " + url);
+  const id = decodeURIComponent(match[1]);
+  if (fetchMode === "race" && id === "A" && !delayedAResolve) {
+    const textPromise = new Promise((resolve) => { delayedAResolve = resolve; });
+    return response(detailPayload("A"), 200, textPromise);
+  }
+  if (id === "C" && failCOnce) {
+    failCOnce = false;
+    cFailures += 1;
+    throw new Error("fixture network failure");
+  }
+  return response(detailPayload(id));
+};
+"""
+
+
+NODE_UI_SCENARIOS = r"""
+;(async () => {
+  const settle = async () => {
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+  };
+  const text = (id) => document.getElementById(id).textContent;
+  await settle();
+
+  const firstCard = document.getElementById("cards").children[0];
+  firstCard.dispatchEvent({type: "click"});
+  await settle();
+  const cardClick = location.hash === "#session=A" && !detailView.hidden && text("detail-body").includes("세션 A");
+
+  document.getElementById("back").dispatchEvent({type: "click"});
+  await settle();
+  const secondCard = document.getElementById("cards").children[1];
+  let enterPrevented = false;
+  secondCard.dispatchEvent({type: "keydown", key: "Enter", preventDefault() { enterPrevented = true; }});
+  await settle();
+  const enterKey = enterPrevented && location.hash === "#session=B" && text("detail-body").includes("세션 B");
+
+  document.getElementById("back").dispatchEvent({type: "click"});
+  await settle();
+  const backToList = location.hash === "" && !listView.hidden && detailView.hidden && document.getElementById("cards").children.length === 3;
+
+  fetchMode = "race";
+  document.getElementById("cards").children[0].dispatchEvent({type: "click"});
+  await settle();
+  location.hash = "#session=B";
+  await settle();
+  const bRenderedBeforeA = text("detail-body").includes("세션 B");
+  delayedAResolve(JSON.stringify(detailPayload("A")));
+  await settle();
+  const responseRace = bRenderedBeforeA && location.hash === "#session=B" && text("detail-body").includes("세션 B") && !text("detail-body").includes("세션 A");
+
+  fetchMode = "normal";
+  location.hash = "#session=C";
+  await settle();
+  failCOnce = true;
+  const firstPoll = scheduledTimers.shift();
+  await firstPoll();
+  await settle();
+  const errorShown = text("banner").includes("fixture network failure");
+  const secondPoll = scheduledTimers.shift();
+  await secondPoll();
+  await settle();
+  const retryRecovery = cFailures === 1 && errorShown && !text("banner").includes("fixture network failure") && text("detail-body").includes("세션 C");
+
+  process.stdout.write(JSON.stringify({cardClick, enterKey, backToList, responseRace, retryRecovery}));
+})().catch((error) => {
+  process.stdout.write(JSON.stringify({harnessError: String(error && error.stack ? error.stack : error)}));
+  process.exitCode = 2;
+});
+"""
+
+
+def run_node_ui_harness():
+    node = shutil.which("node")
+    if node is None:
+        return None, "node 실행 파일 없음"
+    scripts = re.findall(r"<script>(.*?)</script>", dashboard.PAGE_HTML, re.DOTALL)
+    if len(scripts) != 1:
+        return None, f"PAGE_HTML script 블록 expected=1, actual={len(scripts)}"
+    with tempfile.TemporaryDirectory(prefix="orca dashboard node ui ") as temporary_directory:
+        harness_path = Path(temporary_directory) / "ui-contract.js"
+        harness_path.write_text(
+            NODE_UI_HARNESS + "\n" + scripts[0] + "\n" + NODE_UI_SCENARIOS,
+            encoding="utf-8",
+        )
+        try:
+            result = subprocess.run(
+                [node, str(harness_path)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return None, f"{type(error).__name__}: {error}"
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        return None, (
+            f"node JSON 파싱 실패: {error}; exit={result.returncode}; "
+            f"stdout={result.stdout!r}; stderr={result.stderr!r}"
+        )
+    if result.returncode != 0 or payload.get("harnessError"):
+        return None, (
+            f"node harness 오류: exit={result.returncode}; payload={payload!r}; "
+            f"stderr={result.stderr!r}"
+        )
+    return payload, f"node={node}; payload={payload!r}; stderr={result.stderr!r}"
+
+
+print("상세 UI Node 동작")
+node_ui_result, node_ui_detail = run_node_ui_harness()
+for result_key, test_name in (
+    ("cardClick", "① 카드 클릭은 #session=<id> 상세로 진입"),
+    ("enterKey", "② 카드 Enter 키는 상세로 진입"),
+    ("backToList", "③ 뒤로가기는 해시를 비우고 목록 복귀"),
+    ("responseRace", "④ A 응답 지연 중 B 이동 시 최종 상세는 B"),
+    ("retryRecovery", "⑤ 상세 요청 실패 후 다음 폴링 성공 시 오류 해제"),
+):
+    check(
+        test_name,
+        isinstance(node_ui_result, dict) and node_ui_result.get(result_key) is True,
+        node_ui_detail,
+    )
 
 
 print()
