@@ -1627,6 +1627,144 @@ def write_transcript(path, prompt, timestamp="2026-10-07T09:00:00.000Z"):
     )
 
 
+def transcript_read_error_observation(action):
+    error_type = getattr(dashboard, "TranscriptReadError", None)
+    class_contract = (
+        isinstance(error_type, type) and issubclass(error_type, OSError)
+    )
+    try:
+        action()
+    except Exception as error:
+        return {
+            "classContract": class_contract,
+            "raised": True,
+            "isExpected": class_contract and isinstance(error, error_type),
+            "actualType": type(error).__name__,
+            "message": str(error),
+        }
+    return {
+        "classContract": class_contract,
+        "raised": False,
+        "isExpected": False,
+        "actualType": None,
+        "message": "",
+    }
+
+
+def transcript_error_matches(observation, failed_path):
+    message = observation.get("message", "")
+    cause_text = message.replace(str(failed_path), "").strip()
+    return (
+        observation.get("classContract") is True
+        and observation.get("raised") is True
+        and observation.get("isExpected") is True
+        and str(failed_path) in message
+        and bool(cause_text)
+    )
+
+
+def denied_directory_observation():
+    with tempfile.TemporaryDirectory(
+        prefix="orca-dashboard-r30-permission-", dir="/tmp"
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        temporary_root.chmod(0o755)
+        dashboard_copy = temporary_root / "orca-dashboard.py"
+        shutil.copy2(DASHBOARD_PATH, dashboard_copy)
+        denied_directory = temporary_root / "denied-transcripts"
+        denied_directory.mkdir()
+        write_transcript(denied_directory / "denied.jsonl", "권한 거부 요청")
+        denied_directory.chmod(0o000)
+        observation = None
+        permissions_restored = False
+        try:
+            if os.geteuid() != 0:
+                observation = transcript_read_error_observation(
+                    lambda: dashboard.find_transcript(
+                        str(denied_directory), "권한 거부 요청"
+                    )
+                )
+            else:
+                import pwd
+
+                nobody = pwd.getpwnam("nobody")
+
+                def demote_to_nobody():
+                    os.setgroups([])
+                    os.setgid(nobody.pw_gid)
+                    os.setuid(nobody.pw_uid)
+
+                probe = r'''
+import importlib.machinery
+import importlib.util
+import json
+import sys
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("orca_dashboard_permission_probe", sys.argv[1])
+spec = importlib.util.spec_from_loader("orca_dashboard_permission_probe", loader)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+error_type = getattr(module, "TranscriptReadError", None)
+class_contract = isinstance(error_type, type) and issubclass(error_type, OSError)
+try:
+    module.find_transcript(sys.argv[2], "권한 거부 요청")
+except Exception as error:
+    payload = {
+        "classContract": class_contract,
+        "raised": True,
+        "isExpected": class_contract and isinstance(error, error_type),
+        "actualType": type(error).__name__,
+        "message": str(error),
+    }
+else:
+    payload = {
+        "classContract": class_contract,
+        "raised": False,
+        "isExpected": False,
+        "actualType": None,
+        "message": "",
+    }
+print(json.dumps(payload, ensure_ascii=False))
+'''
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        probe,
+                        str(dashboard_copy),
+                        str(denied_directory),
+                    ],
+                    cwd="/tmp",
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    preexec_fn=demote_to_nobody,
+                )
+                try:
+                    observation = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    observation = {
+                        "classContract": False,
+                        "raised": False,
+                        "isExpected": False,
+                        "actualType": "permission probe failure",
+                        "message": (
+                            f"exit={result.returncode}, stdout={result.stdout!r}, "
+                            f"stderr={result.stderr!r}"
+                        ),
+                    }
+        finally:
+            denied_directory.chmod(0o700)
+            permissions_restored = (
+                denied_directory.stat().st_mode & 0o777
+            ) == 0o700
+        observation["permissionsRestored"] = permissions_restored
+        observation["failedPath"] = str(denied_directory)
+        return observation
+
+
 print("find_transcript")
 with tempfile.TemporaryDirectory(prefix="orca dashboard transcripts ") as temporary_directory:
     transcript_directory = Path(temporary_directory)
@@ -1892,12 +2030,17 @@ for match_source, match_fixture in (
         True,
     )
     expect_equal(
-        f"{match_source}은 Orca 쪽이 60자 이상 접두사로 잘리면 일치",
+        (
+            "① 사용자 요청은 prompt 원문이 200자 미만이면 "
+            "60자 이상 접두사만 일치해도 불일치"
+            if match_source == "① 사용자 요청"
+            else "② assistant 응답은 60자 이상 접두사만 일치해도 불일치"
+        ),
         lambda match_fixture=match_fixture: match_fixture(
             R25_PREFIX_60 + " transcript 에만 남은 뒷부분",
             R25_PREFIX_60,
         ),
-        True,
+        False,
     )
     expect_equal(
         f"{match_source}은 Orca 쪽 잘린 접두사가 60자 미만이면 불일치",
@@ -1907,6 +2050,73 @@ for match_source, match_fixture in (
         ),
         False,
     )
+
+expect_equal(
+    "ORCA_PROMPT_LIMIT = 200",
+    lambda: dashboard.ORCA_PROMPT_LIMIT,
+    200,
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard r29 exact priority ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    exact_prompt = "단일 완전한 요청 " + ("가" * 80)
+    exact_older = transcript_directory / "older-exact.jsonl"
+    prefixed_newer = transcript_directory / "newer-extended.jsonl"
+    write_transcript(exact_older, exact_prompt)
+    write_transcript(prefixed_newer, exact_prompt + " 추가 조건")
+    os.utime(exact_older, (100, 100))
+    os.utime(prefixed_newer, (200, 200))
+    expect_equal(
+        "정확한 S 이전 파일과 S+추가 최신 파일이 공존하면 정확한 이전 파일 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), exact_prompt
+        ),
+        str(exact_older),
+    )
+
+R29_TRUNCATED_PROMPT = "다" * 200
+expect_equal(
+    "prompt 원문 200자와 더 긴 transcript 요청의 접두사가 일치하면 일치",
+    lambda: r25_prompt_match(
+        R29_TRUNCATED_PROMPT + " transcript 에만 남은 추가 요청",
+        R29_TRUNCATED_PROMPT,
+    ),
+    True,
+)
+
+print("find_transcript 읽기 실패 노출")
+transcript_error_type = getattr(dashboard, "TranscriptReadError", None)
+check(
+    "TranscriptReadError 는 OSError 하위 클래스",
+    isinstance(transcript_error_type, type)
+    and issubclass(transcript_error_type, OSError),
+    f"actual={transcript_error_type!r}",
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard r30 all unreadable ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    failed_candidate = transcript_directory / "all-unreadable.jsonl"
+    failed_candidate.mkdir()
+    all_unreadable = transcript_read_error_observation(
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "일치하지 않는 요청"
+        )
+    )
+    check(
+        "후보 전부 읽기 실패 + 일치 없음은 경로·원인을 담은 TranscriptReadError",
+        transcript_error_matches(all_unreadable, failed_candidate),
+        f"observation={all_unreadable!r}",
+    )
+
+permission_observation = denied_directory_observation()
+check(
+    "transcript 디렉토리 권한 거부는 권한 복구 후 TranscriptReadError",
+    permission_observation.get("permissionsRestored") is True
+    and transcript_error_matches(
+        permission_observation, permission_observation.get("failedPath")
+    ),
+    f"observation={permission_observation!r}",
+)
 
 
 from datetime import datetime
@@ -2699,6 +2909,21 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard sole unreadable ") as te
         str(next_latest),
     )
 
+with tempfile.TemporaryDirectory(prefix="orca dashboard sole all unreadable ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    failed_candidate = transcript_directory / "only-unreadable.jsonl"
+    failed_candidate.mkdir()
+    sole_unreadable = transcript_read_error_observation(
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), None, None, sole_session=True
+        )
+    )
+    check(
+        "단일 세션 ③에서 읽기 가능한 파일이 하나도 없으면 TranscriptReadError",
+        transcript_error_matches(sole_unreadable, failed_candidate),
+        f"observation={sole_unreadable!r}",
+    )
+
 expect_equal(
     "단일 세션이어도 transcript 디렉토리가 없으면 None",
     lambda: dashboard.find_transcript(
@@ -2897,6 +3122,75 @@ check(
     and unique_terminal_detail.get("transcript") is True,
     unique_terminal_error,
 )
+
+
+print("serve transcript 읽기 실패 노출")
+with tempfile.TemporaryDirectory(prefix="orca dashboard r30 serve ") as temporary_directory:
+    temporary_root = Path(temporary_directory)
+    read_failure_env = fixture_environment(temporary_directory)
+    projects_root = temporary_root / "claude-projects"
+    transcript_directory = Path(
+        dashboard.transcript_dir(str(projects_root), "/tmp/wt-stub")
+    )
+    transcript_directory.mkdir(parents=True)
+    failed_candidate = transcript_directory / "unreadable.jsonl"
+    failed_candidate.mkdir()
+    read_failure_env["CLAUDE_PROJECTS_DIR"] = str(projects_root)
+    read_failure_port = unused_local_port()
+    read_failure_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(DASHBOARD_PATH),
+            "serve",
+            "--port",
+            str(read_failure_port),
+            "--interval",
+            "0.1",
+        ],
+        cwd=ROOT,
+        env=read_failure_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    read_failure_ready = None
+    read_failure_ready_error = "server did not become ready"
+    read_failure_response = None
+    try:
+        read_failure_ready, read_failure_ready_error = wait_for_snapshot(
+            read_failure_process,
+            read_failure_port,
+            lambda payload: any(
+                session.get("id") == "tab-stub:leaf-stub"
+                for session in payload.get("sessions", [])
+            ),
+            timeout=5,
+        )
+        if read_failure_ready is not None:
+            read_failure_response = http_response(
+                f"http://127.0.0.1:{read_failure_port}/api/session?id=tab-stub:leaf-stub"
+            )
+    finally:
+        stop_process(read_failure_process)
+
+    read_failure_payload = None
+    if read_failure_response is not None:
+        try:
+            read_failure_payload = json.loads(read_failure_response[2])
+        except json.JSONDecodeError:
+            pass
+    check(
+        "/api/session transcript 읽기 실패는 200 + transcript false + transcriptError 문자열",
+        read_failure_response is not None
+        and read_failure_response[0] == 200
+        and isinstance(read_failure_payload, dict)
+        and read_failure_payload.get("transcript") is False
+        and isinstance(read_failure_payload.get("transcriptError"), str)
+        and bool(read_failure_payload["transcriptError"]),
+        read_failure_ready_error
+        if read_failure_ready is None
+        else f"response={read_failure_response!r}, payload={read_failure_payload!r}",
+    )
 
 
 NODE_UI_HARNESS = r"""
