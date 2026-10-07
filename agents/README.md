@@ -1,4 +1,4 @@
-# agents — 페르소나 정의 (27개)
+# agents — 페르소나 정의 (24개)
 
 역할·조건·목표를 정의한다. **모델은 여기서 정하지 않는다** — `roles.json` 이 소유한다 (frontmatter `model:` 은 lint 오류).
 
@@ -18,14 +18,19 @@
 | `private-context-analyst` | analyze.context · analyze.cross | 개인 프로젝트용 컨텍스트 분석가. 티켓·요구사항을 받아 수정 범위·레이어별 공개 계약·테스트 케이스·미결 사항을 분석 문서로 산출한다. 서로 다른 런타임 2개가 독립 실행… |
 | `private-code-reviewer` | review.code | 개인 프로젝트용 코드 리뷰어 (BE+FE). 브랜치·worktree·diff 범위를 받아 변경 파일을 전수 읽고 p0~p5 등… |
 | `private-fe-implementer` | implement.fe | 개인 프로젝트용 FE 작업자. React(웹)·React Native 컴포넌트를 컴포넌트 단위 TDD(테스트 먼저)로 구현한다… |
+| `private-idea-generator` | idea.generate · idea.cross | 개인 프로젝트용 신규 아이디어 발굴가. 검증된 시장 조사를 근거로 경쟁사 미제공·고객 요구 미충족 지점의 신규 아이디어를 가설·검증 방법과 함께 제시한다. 서로 다른 런타임 2개가 독립 실행… |
 | `private-infra-reviewer` | review.infra | 개인 프로젝트용 인프라 리뷰어 (MySQL·MongoDB·Kafka·Redis). 마이그레이션 SQL·Mongo 마이그레이션 … |
 | `private-kafka-implementer` | implement.kafka | 개인 프로젝트용 Kafka 작업자. 로컬 docker compose 환경에서 토픽 설계(파티션·보존·압축)·JSON 메시지 스… |
+| `private-market-researcher` | research.market · research.cross | 개인 프로젝트용 시장 조사가. 경쟁사 목표·전략·출시 기능·로드맵과 고객 요구(사용자 문서·공개 리뷰)를 사실/해석 분리·출처 URL과 함께 조사한다. 서로 다른 런타임 2개가 독립 실행… |
 | `private-mongodb-implementer` | implement.mongodb | 개인 프로젝트용 MongoDB 작업자. senior-dba의 DB 설계를 받아 컬렉션 생성·인덱스·JSON Schema val… |
 | `private-mysql-implementer` | implement.mysql | 개인 프로젝트용 MySQL 작업자. 앱 레포 안 Flyway 마이그레이션(src/main/resources/db/migrati… |
 | `private-prd-reviewer` | prd.review | 개인 프로젝트용 PRD 리뷰어. private-prd-writer가 작성한 PRD를 검수한다 — 섹션 누락·모호성·측정 불가 … |
 | `private-prd-writer` | prd.author | 개인 프로젝트용 PRD 작업자. 아이디어·요구사항을 받아 전체 구조를 갖춘 PRD를 작성해 /Users/biuea/Deskt… |
 | `private-qa` | qa | 개인 프로젝트용 QA. dev 환경(작업 브랜치 → main 머지·배포)에 올라간 기능을 PRD 유저 시나리오 기반 E2E로 … |
 | `private-redis-implementer` | implement.redis | 개인 프로젝트용 Redis 작업자. 키 스키마·TTL·자료구조·분산 락·pub/sub 채널을 설계하고 docker compos… |
+| `private-research-verifier` | research.verify | 개인 프로젝트용 조사 교차 검증가. 조사 A·B를 주장 단위로 대조하고 출처 URL을 직접 열어 확정 사실·재조사 요청을 산출한다. 다수결로 판정하지 않는다… |
+| `private-roadmap-planner` | roadmap.author · roadmap.split | 개인 프로젝트용 로드맵 플래너. 검증 조사·아이디어·회사 로드맵(제약)으로 도메인별 목표·RICE 우선순위·단계를 정하고, 승인된 로드맵을 PRD 단위 과제로 분리한다… |
+| `private-roadmap-reviewer` | roadmap.review | 개인 프로젝트용 로드맵 리뷰어. 로드맵·과제 분리·PRD 묶음(portfolio)을 검수해 verdict와 유형별(fact/idea/priority/boundary/policy) 지적을 낸다. 지적 유형이 루프백 단계를 정한다… |
 | `private-senior-be` | design.be | 개인 프로젝트용 시니어 BE. 검수 완료된 PRD를 받아 아키텍처 설계와 TDD(Technical Design Document… |
 | `private-senior-dba` | design.db | 개인 프로젝트용 시니어 DBA (MySQL + MongoDB). 검수 완료된 PRD와 BE TDD를 받아 저장소 선택(기본 M… |
 | `private-senior-fe` | design.fe | 개인 프로젝트용 시니어 FE. 검수 완료된 PRD와 BE API 계약을 받아 React(웹)·React Native(앱) 기술… |

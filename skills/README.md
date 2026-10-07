@@ -1,8 +1,8 @@
-# skills — 자연어 호출 절차 (11개)
+# skills — 자연어 호출 절차 (12개)
 
 단계는 **role** 만 참조한다. 구체 agent·모델을 직접 부르지 않는다 — lint 가 `Agent(private-*)` 직접 호출을 오류로 잡는다.
 
-## 하네스 소유 (5개)
+## 하네스 소유 (6개)
 
 frontmatter 에 `requires`(적합성 레벨)·`roles`(사용 role) 선언 필수.
 
@@ -13,6 +13,7 @@ frontmatter 에 `requires`(적합성 레벨)·`roles`(사용 role) 선언 필수
 | `/private-feature` | L2 | 개인 프로젝트 풀 파이프라인 — PRD 작성→검수→시니어 설계(be 먼저, fe/dba 병렬)→pm 정합 검증→구현 지휘(wave 병렬)→리뷰→PR 자동머지. 요… |
 | `/private-implement` | L1 | 개인 프로젝트 경량 파이프라인 — 교차 런타임 TDD: 컨텍스트 이중 분석(A‖B) → RED(B) → GREEN/REFACTOR(A) → 결정적 게이트 → 교차 리뷰(B, 재작업 최대 2회, p0~p3 0건) → draft PR → 회고 → (사용자 확인 후) 머지… |
 | `/private-release` | L1 | 개인 프로젝트 prod 릴리즈 — private-qa로 배포 가부를 조사하고, PASS면 YYYYMMDD-NN 태그를 따서 prod 프로필로 배포한다. QA FA… |
+| `/private-roadmap` | L2 | 개인 프로젝트 과제 발굴·구체화 — 경쟁사·고객 요구 조사(A‖B) → 교차 검증 → 신규 아이디어(A‖B) → 로드맵 → PRD 단위 과제 분리 → PRD 구체화·리뷰 → 과제 간 충돌 검증 → 확정. 지적 유형별 루프백… |
 
 ## 그 외 (6개)
 

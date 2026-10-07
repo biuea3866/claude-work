@@ -102,6 +102,42 @@
       "agent": "private-architect", "requires": "L1",
       "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebSearch", "WebFetch"] }
     },
+
+    "research.market": {
+      "agent": "private-market-researcher", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "WebSearch", "WebFetch"] }
+    },
+    "research.cross": {
+      "agent": "private-market-researcher", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "WebSearch", "WebFetch"] },
+      "verifies": ["research.market"]
+    },
+    "research.verify": {
+      "agent": "private-research-verifier", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "WebSearch", "WebFetch"] }
+    },
+    "idea.generate": {
+      "agent": "private-idea-generator", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "WebSearch", "WebFetch"] }
+    },
+    "idea.cross": {
+      "agent": "private-idea-generator", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "WebSearch", "WebFetch"] },
+      "verifies": ["idea.generate"]
+    },
+    "roadmap.author": {
+      "agent": "private-roadmap-planner", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "roadmap.split": {
+      "agent": "private-roadmap-planner", "requires": "L1",
+      "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] }
+    },
+    "roadmap.review": {
+      "agent": "private-roadmap-reviewer", "requires": "L0",
+      "exec": { "access": "read-only", "tools": ["Read", "Grep", "Glob", "Bash", "WebFetch"] },
+      "verifies": ["roadmap.author", "roadmap.split"]
+    },
     "design.be": {
       "agent": "private-senior-be", "requires": "L2",
       "exec": { "access": "workspace-write", "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebSearch", "WebFetch"] }
@@ -193,6 +229,16 @@
       "prd.author":      { "runtime": "codex",  "tier": "T2" },
       "prd.review":      { "runtime": "claude", "tier": "T1" },
 
+      "research.market": { "runtime": "claude", "tier": "T1" },
+      "research.cross":  { "runtime": "codex",  "tier": "T1" },
+      "research.verify": { "runtime": "claude", "tier": "T1",
+                           "_note": "A(claude)·B(codex) 양쪽을 판정한다 — 출처 URL 을 직접 열어 확인하므로 작성 런타임과의 맹점 공유보다 실재 확인이 우선이다" },
+      "idea.generate":   { "runtime": "claude", "tier": "T1" },
+      "idea.cross":      { "runtime": "codex",  "tier": "T1" },
+      "roadmap.author":  { "runtime": "codex",  "tier": "T1" },
+      "roadmap.split":   { "runtime": "codex",  "tier": "T1" },
+      "roadmap.review":  { "runtime": "claude", "tier": "T1" },
+
       "architect":       { "runtime": "codex",  "tier": "T1" },
       "design.be":       { "runtime": "codex",  "tier": "T1",
                            "_degrade": "role requires L2(implementer 팀 지휘)이지만 이 노드는 설계 문서 작성만 수행한다. wave 지휘·fanout 소유권은 메인 세션(L2)에 둔다" },
@@ -227,6 +273,14 @@
       "_default": { "runtime": "claude", "tier": "T2" },
 
       "architect":       { "runtime": "claude", "tier": "T1" },
+      "research.market": { "runtime": "claude", "tier": "T1" },
+      "research.cross":  { "runtime": "claude", "tier": "T1" },
+      "research.verify": { "runtime": "claude", "tier": "T1" },
+      "idea.generate":   { "runtime": "claude", "tier": "T1" },
+      "idea.cross":      { "runtime": "claude", "tier": "T1" },
+      "roadmap.author":  { "runtime": "claude", "tier": "T1" },
+      "roadmap.split":   { "runtime": "claude", "tier": "T1" },
+      "roadmap.review":  { "runtime": "claude", "tier": "T1" },
       "design.be":       { "runtime": "claude", "tier": "T1" },
       "design.fe":       { "runtime": "claude", "tier": "T1" },
       "design.db":       { "runtime": "claude", "tier": "T1" },
