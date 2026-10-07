@@ -102,6 +102,7 @@ COMMAND_NAME_RE = re.compile(r"<command-name>/([^<\s]+)</command-name>")
 COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 REQUEST_COMMAND_PREFIX = "private-"  # 등록 파이프라인 슬래시 호출만 요청 (parse_transcript 는 pipelines 를 모른다)
 RUN_DIRECTORY_RE = re.compile(r"runs/([a-z][a-z0-9-]*)/(\d{8}-[a-z0-9-]+)")
+HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SHORT_FOLLOWUP_RE = re.compile(r"^(승인|머지|푸시|커밋|진행|계속|이어서|네|응|ㅇㅇ|ok|yes|좋아|고고|\d{1,2})", re.I)
 SHORT_FOLLOWUP_MAX_CHARS = 20
 TINY_REQUEST_MAX_CHARS = 12
@@ -793,11 +794,29 @@ def _user_request_text(record: dict) -> str | None:
 
     parse_transcript prompts · find_transcript ① · split_work_items 가 모두 이 판정을 쓴다.
     """
+    if record.get("isMeta") is True:
+        return None  # H9 — 하네스 주입 메시지(사용 한도 안내·자동 이어가기 등)
     if record.get("type") == "user":
         text = "\n".join(_user_texts(record)).strip()
     else:
         text = (_queued_command(record, "prompt") or "").strip()
     return text if is_user_request(text) else None
+
+
+def strip_heredocs(command: str) -> str:
+    """H10 — heredoc 본문(구분자 다음 줄 ~ 구분자만 있는 줄)을 제거한 명령."""
+    kept: list[str] = []
+    terminator: str | None = None
+    for line in command.split("\n"):
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        kept.append(line)
+        match = HEREDOC_START_RE.search(line)
+        if match:
+            terminator = match.group(2)
+    return "\n".join(kept)
 
 
 def _is_interrupt(record: dict) -> bool:
@@ -1081,7 +1100,10 @@ class _WorkSplitter:
         if block.get("name") == "Skill" and tool_input.get("skill") in self._pipelines:
             return tool_input["skill"], None, _pipeline_title(tool_input["skill"], tool_input.get("args"))
         command = tool_input.get("command")
-        if block.get("name") != "Bash" or not isinstance(command, str) or "mkdir" not in command:
+        if block.get("name") != "Bash" or not isinstance(command, str):
+            return None
+        command = strip_heredocs(command)
+        if "mkdir" not in command:
             return None
         for match in RUN_DIRECTORY_RE.finditer(command):
             if match.group(1) in self._pipelines:
