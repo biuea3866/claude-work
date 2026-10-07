@@ -105,7 +105,9 @@ RUN_DIRECTORY_RE = re.compile(r"runs/([a-z][a-z0-9-]*)/(\d{8}-[a-z0-9-]+)")
 HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SHORT_FOLLOWUP_RE = re.compile(r"^(승인|머지|푸시|커밋|진행|계속|이어서|네|응|ㅇㅇ|ok|yes|좋아|고고|\d{1,2})", re.I)
 SHORT_FOLLOWUP_MAX_CHARS = 20
-TINY_REQUEST_MAX_CHARS = 12
+SHELL_SEPARATOR_CHARS = ";&|\n"
+SHELL_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+SHELL_VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 WORK_RESULTS = ("completed", "in_progress", "answered", "interrupted")
 HISTORY_SCHEMA_VERSION = 1
 HISTORY_TRACKED_FIELDS = ("status", "percent", "basis", "pipeline", "step")
@@ -819,6 +821,60 @@ def strip_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+def _shell_commands(command: str) -> list[list[str]]:
+    """명령 문자열 → 단순 명령(토큰 목록) 목록. `&&`·`||`·`;`·`|`·줄바꿈으로 나누고 `#` 주석은 버린다.
+
+    shlex 가 따옴표를 풀지 못하면(짝 없는 따옴표 등) ValueError 를 올린다.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_SEPARATOR_CHARS)
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    commands: list[list[str]] = [[]]
+    in_comment = False
+    for token in lexer:
+        if token and all(char in SHELL_SEPARATOR_CHARS for char in token):
+            if "\n" in token:
+                in_comment = False
+            if commands[-1]:
+                commands.append([])
+            continue
+        if in_comment or token.startswith("#"):
+            in_comment = True
+            continue
+        commands[-1].append(token)
+    return [tokens for tokens in commands if tokens]
+
+
+def _expand_variables(word: str, variables: dict[str, str]) -> str:
+    """`$NAME`·`${NAME}` 를 앞선 할당 값으로 치환 (모르는 변수는 그대로)."""
+    return SHELL_VARIABLE_RE.sub(lambda match: variables.get(match.group(1) or match.group(2), match.group(0)), word)
+
+
+def mkdir_targets(command: str) -> list[str]:
+    """H14 — heredoc 을 뺀 명령에서 `mkdir` 의 대상 인자(옵션 제외, 변수 치환 후). 파싱 실패는 [] (보수적)."""
+    try:
+        commands = _shell_commands(strip_heredocs(command))
+    except ValueError:
+        return []
+    variables: dict[str, str] = {}
+    targets: list[str] = []
+    for tokens in commands:
+        index = 0
+        while index < len(tokens) and (assignment := SHELL_ASSIGNMENT_RE.match(tokens[index])):
+            variables[assignment.group(1)] = _expand_variables(assignment.group(2), variables)
+            index += 1
+        if index >= len(tokens) or os.path.basename(tokens[index]) != "mkdir":
+            continue
+        options_done = False
+        for argument in tokens[index + 1:]:
+            if not options_done and argument == "--":
+                options_done = True
+            elif options_done or not argument.startswith("-"):
+                targets.append(_expand_variables(argument, variables))
+    return targets
+
+
 def _is_interrupt(record: dict) -> bool:
     return "\n".join(_user_texts(record)).strip().startswith(INTERRUPT_PREFIX)
 
@@ -982,10 +1038,8 @@ def parse_transcript(lines: Iterable[str]) -> dict:
 
 
 def is_short_followup(text: str) -> bool:
-    """'승인'·'머지해'·'1' 같은 짧은 후속 — 직전 작업에 귀속된다."""
+    """H12 — '승인'·'머지해'·'1' 같은 후속 표현으로 시작하는 20자 이하 요청. 길이만으로는 후속이 아니다."""
     normalized = _normalized(text)
-    if len(normalized) <= TINY_REQUEST_MAX_CHARS:
-        return True
     return len(normalized) <= SHORT_FOLLOWUP_MAX_CHARS and SHORT_FOLLOWUP_RE.match(normalized) is not None
 
 
@@ -1007,18 +1061,21 @@ def _work_title(request: str) -> str:
 
 
 def _reported_completion(work: dict) -> bool:
-    return bool(work["lastText"]) and COMPLETION_RE.search(work["lastText"]) is not None
+    """H11 — 완료 보고는 고정: 한 번 기록된 completedAt 은 이후 응답으로 취소되지 않는다."""
+    return work["completed"]
 
 
 def _work_result(work: dict, final_step: int | None, pipelines: dict[str, list[int]], is_last: bool) -> str:
-    """G3 — 완료 보고 > 마지막 작업 > 중단 표식·Step 중간 정지 > 응답 종료."""
+    """G3 — 완료 보고 > 명시 중단(H13) > 마지막 작업 > Step 중간 정지 > 응답 종료."""
     if _reported_completion(work):
         return "completed"
+    if work["interrupted"]:
+        return "interrupted"
     if is_last:
         return "in_progress"
     steps = (pipelines.get(work["pipeline"]) or []) if work["pipeline"] else []
     stopped_midway = work["pipeline"] is not None and (not steps or final_step != steps[-1])
-    return "interrupted" if work["interrupted"] or stopped_midway else "answered"
+    return "interrupted" if stopped_midway else "answered"
 
 
 def _work_progress(result: str, pipeline: str | None, step: int | None, pipelines: dict[str, list[int]]) -> dict:
@@ -1045,7 +1102,8 @@ class _WorkSplitter:
         return self._works[-1] if self._works else None
 
     def _is_active(self, work: dict) -> bool:
-        return work["pipeline"] is not None and not _reported_completion(work)
+        """활성 = 파이프라인이 있고 완료(H11)·명시 중단(H13) 상태가 아님."""
+        return work["pipeline"] is not None and not _reported_completion(work) and not work["interrupted"]
 
     def _start(self, record: dict, at: int | None, title: str, pipeline: str | None, run_id: str | None = None) -> dict:
         uuid = record.get("uuid")
@@ -1058,7 +1116,8 @@ class _WorkSplitter:
             "pipeline": pipeline,
             "runId": run_id,
             "steps": [],
-            "lastText": None,
+            "completed": False,
+            "completedAt": None,
             "interrupted": False,
             "subagents": 0,
             "backgroundShells": 0,
@@ -1092,6 +1151,7 @@ class _WorkSplitter:
             joins = pipeline is None and is_short_followup(text)
         if not joins:
             work = self._start(record, at, _work_title(text), pipeline)
+        work["interrupted"] = False  # H13 — 귀속된 후속 요청은 재개
         work["requestCount"] += 1
 
     def _signal(self, block: dict) -> tuple[str, str | None, str] | None:
@@ -1102,11 +1162,9 @@ class _WorkSplitter:
         command = tool_input.get("command")
         if block.get("name") != "Bash" or not isinstance(command, str):
             return None
-        command = strip_heredocs(command)
-        if "mkdir" not in command:
-            return None
-        for match in RUN_DIRECTORY_RE.finditer(command):
-            if match.group(1) in self._pipelines:
+        for target in mkdir_targets(command):
+            match = RUN_DIRECTORY_RE.search(target)
+            if match and match.group(1) in self._pipelines:
                 return match.group(1), match.group(0), _pipeline_title(match.group(1), match.group(2))
         return None
 
@@ -1151,9 +1209,10 @@ class _WorkSplitter:
         work = self._current
         if work is None or not text.strip():
             return
-        work["lastText"] = text
         if COMPLETION_RE.search(text):
             work["interrupted"] = False
+            if not work["completed"]:
+                work["completed"], work["completedAt"] = True, at
         if work["pipeline"] is None:
             return
         current = _current_steps(text)
@@ -1666,7 +1725,8 @@ class HistoryStore:
     """관측 히스토리 JSONL — 값이 바뀐 점만 append, 세션당 HISTORY_POINTS_PER_SESSION 개 메모리 사본.
 
     실패는 예외 없이 경고 문자열로 돌려준다 (기록 실패가 수집·화면을 막지 않는다).
-    쓰기 실패한 점은 메모리에도 반영하지 않아 다음 주기에 다시 시도·경고한다.
+    H15 — append 성공한 점만 메모리에 1회 반영한다. 쓰기 실패한 점은 반영하지 않아 다음 주기에 다시 시도한다.
+    압축은 append 와 별도 단계: 성공하면 메모리 = 압축 결과, 실패하면 경고만 남기고 이미 반영한 점은 재기록하지 않는다.
     """
 
     def __init__(self, path: str):
@@ -1698,17 +1758,7 @@ class HistoryStore:
         with self._lock:
             last_points = {session_id: points[-1] for session_id, points in self._points.items() if points}
             changes = history_changes(last_points, snapshot, now_ms)
-            warnings: list[str] = []
-            if changes:
-                try:
-                    self._append(changes)
-                except OSError as error:
-                    warnings = [f"history 기록 실패 {self._path}: {error}"]
-                else:
-                    for point in changes:
-                        session_points = self._points.setdefault(point["sessionId"], [])
-                        session_points.append(point)
-                        del session_points[:-HISTORY_POINTS_PER_SESSION]
+            warnings = self._write(changes) if changes else []
             self._record_warnings = warnings
             return list(warnings)
 
@@ -1721,29 +1771,50 @@ class HistoryStore:
         with self._lock:
             return [*self._load_warnings, *self._record_warnings]
 
-    def _append(self, changes: list[dict]) -> None:
-        """잠금 파일 flock 아래 append. 끝이 개행이 아니면(잘린 줄) 먼저 개행, 임계값 초과 시 압축."""
+    def _write(self, changes: list[dict]) -> list[str]:
+        """잠금 파일 flock 아래 append → 메모리 반영 → (임계값 초과 시) 압축. 실패는 경고 목록."""
         directory = os.path.dirname(self._path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(self._path + ".lock", "a", encoding="utf-8") as lock:
+        try:
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            lock = open(self._path + ".lock", "a", encoding="utf-8")
+        except OSError as error:
+            return [f"history 기록 실패 {self._path}: {error}"]
+        with lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                with open(self._path, "a+b") as handle:
-                    size = handle.seek(0, os.SEEK_END)
-                    broken_tail = False
-                    if size:
-                        handle.seek(size - 1)
-                        broken_tail = handle.read(1) != b"\n"
-                    payload = b"".join(
-                        json.dumps(point, ensure_ascii=False).encode("utf-8") + b"\n" for point in changes
-                    )
-                    handle.write((b"\n" if broken_tail else b"") + payload)
-                self._line_count += len(changes)
-                if self._line_count > HISTORY_COMPACT_LINES:
+                try:
+                    self._append(changes)
+                except OSError as error:
+                    return [f"history 기록 실패 {self._path}: {error}"]
+                self._remember(changes)
+                if self._line_count <= HISTORY_COMPACT_LINES:
+                    return []
+                try:
                     self._compact(directory or ".")
+                except OSError as error:
+                    return [f"history 기록 실패 {self._path}: 압축 실패 — {error}"]
+                return []
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _append(self, changes: list[dict]) -> None:
+        """끝이 개행이 아니면(잘린 줄) 먼저 개행 후 append. 호출자가 flock 을 잡는다."""
+        with open(self._path, "a+b") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            broken_tail = False
+            if size:
+                handle.seek(size - 1)
+                broken_tail = handle.read(1) != b"\n"
+            payload = b"".join(json.dumps(point, ensure_ascii=False).encode("utf-8") + b"\n" for point in changes)
+            handle.write((b"\n" if broken_tail else b"") + payload)
+        self._line_count += len(changes)
+
+    def _remember(self, changes: list[dict]) -> None:
+        for point in changes:
+            session_points = self._points.setdefault(point["sessionId"], [])
+            session_points.append(point)
+            del session_points[:-HISTORY_POINTS_PER_SESSION]
 
     def _compact(self, directory: str) -> None:
         """세션별 상한만 남겨 임시 파일에 쓰고 os.replace (중간 상태가 남지 않는다)."""
@@ -2383,6 +2454,8 @@ let detailError = null;
 let detailMissing = null;
 let detailRequest = 0;
 let openedFromList = false;
+/* H16 — 과거 작업 <details> 를 "세션 id · 작업 id" 로 기억해 재렌더(폴링) 뒤에도 펼침 상태를 복원한다 */
+let workDetailNodes = new Map();
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -2870,8 +2943,15 @@ function workHistoryPanel(payload) {
   list.appendChild(latestNode);
   const past = items.slice(0, -1).reverse();
   if (past.length) list.appendChild(el("div", "works-past-label", "이전 작업 " + past.length + "개"));
+  const sessionId = payload.session && payload.session.id;
+  const previousNodes = workDetailNodes;
+  workDetailNodes = new Map();
   for (const item of past) {
     const node = el("details", "work result-" + item.result);
+    const key = sessionId + "\u0000" + item.id;
+    const previous = previousNodes.get(key);
+    if (previous && previous.open) node.open = true;
+    workDetailNodes.set(key, node);
     const summaryNode = el("summary");
     summaryNode.appendChild(workHead(item));
     node.appendChild(summaryNode);
