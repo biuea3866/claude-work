@@ -39,7 +39,7 @@
 
 | 등급 | 기준 | claude | codex (모델 + `model_reasoning_effort`) |
 |---|---|---|---|
-| **T1** | 설계 판단·리뷰 판정. 틀리면 하위 노드 전부가 오염된다 | `opus` | `sol` + `high` |
+| **T1** | 설계 판단·리뷰 판정. 틀리면 하위 노드 전부가 오염된다 | `opus` | `sol6`(gpt-6-sol) + `high` — 2026-10-07 `sol`(gpt-5.6-sol)에서 상향 |
 | **T2** | 규격이 정해진 산출물 생성. 틀려도 그 노드에서 잡힌다 | `sonnet` | `terra` + `medium` |
 | **T3** | 기계적 변환. 컨벤션 문서가 답을 이미 갖고 있다 | `haiku` | `luna` + `low` |
 
@@ -61,7 +61,7 @@
 
 | role | 산출물 성격 | runtime | tier | 근거 |
 |---|---|---|---|---|
-| `prd.author` | 문서 작성 | codex | T2 | 템플릿 구조가 정해져 있고(`private-prd-template`), 모호점은 질문 목록으로 반환 — 창작이 아니라 정리 |
+| `prd.author` | 문서 작성 | codex | T1 | (2026-10-07 T2 → T1 상향 — 과제별 PRD 품질) 템플릿 구조가 정해져 있고(`private-prd-template`), 모호점은 질문 목록으로 반환 — 창작이 아니라 정리 |
 | `prd.review` | **문서 리뷰** | **claude** | T1 | codex가 쓴 PRD를 교차 검수. 코드베이스와의 충돌 판단이 포함돼 판정 난이도가 높다 |
 | `architect` | 문서 작성 | codex | T1 | 구조 진단·바운디드 컨텍스트 판단. 틀리면 이후 전 설계가 잘못된 경계 위에 선다 |
 | `design.be` | 문서 작성 | codex | T1 | TDD가 BE·FE·DB 티켓 전부의 입력 |
@@ -87,7 +87,7 @@
 
 | 노드 | role | runtime | tier |
 |---|---|---|---|
-| `prd` | `prd.author` | codex | T2 |
+| `prd` | `prd.author` | codex | T1 |
 | `prd-review` | `prd.review` | claude | T1 |
 | `design-be` | `design.be` | codex | T1 |
 | `design-db` | `design.db` | codex | T1 |
@@ -183,4 +183,4 @@
 - **codex 등급 차이의 실효성 미검증.** 모델(sol/terra/luna) × `model_reasoning_effort`(high/medium/low) 조합이 T1/T2/T3 구분으로 충분한지 `evals/` 골든 태스크로 확인 전이다. 그 전까지 이 등급 배정은 **가설**이다 (`evals/README.md`의 문제의식과 동일).
 - **`fable` 위치 미확정.** 카탈로그에만 두고 tier에 넣지 않았다. eval로 opus·sonnet 대비 위치를 재면 등급에 편입한다.
 - **codex 훅 stdin shape 미검증.** shape가 다르면 게이트가 조용히 exit 0으로 빠진다. 이 배정은 codex를 쓰기 경로에서 뺐지만, codex가 메인 세션을 잡는 구성에서는 여전히 위험이다.
-- **`prd.author` T2와 `qa` T2는 조정 여지가 있다.** 산출물 품질이 낮으면 T1으로 올린다 — 판단 근거는 eval 리포트로 남긴다.
+- **`prd.author` 는 2026-10-07 T1(sol6 = gpt-6-sol · high)로 상향했다. `qa` T2는 조정 여지가 있다.** 산출물 품질이 낮으면 T1으로 올린다 — 판단 근거는 eval 리포트로 남긴다.
