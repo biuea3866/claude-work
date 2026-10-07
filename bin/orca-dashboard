@@ -75,6 +75,7 @@ PROMPT_TEXT_CHARS = 160
 TIMELINE_LIMIT = 60
 AGENT_TOOL_NAMES = ("Agent", "Task")
 TASK_NOTIFICATION_PREFIX = "<task-notification>"
+CONTINUATION_PREFIX = "This session is being continued from a previous conversation"
 TASK_NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
 NOTIFICATION_FIELD_RE = {
     field: re.compile(rf"<{field}>(.*?)</{field}>", re.S) for field in ("tool-use-id", "status", "summary")
@@ -725,7 +726,7 @@ def _user_request_text(record: dict) -> str | None:
     if record.get("type") != "user":
         return None
     text = "\n".join(_content_texts(_record_content(record))).strip()
-    if not text or text.startswith(TASK_NOTIFICATION_PREFIX):
+    if not text or text.startswith((TASK_NOTIFICATION_PREFIX, CONTINUATION_PREFIX)):
         return None
     return text
 
@@ -994,7 +995,7 @@ def collect(
     """스킬 정의 → worktree ps → terminal list → 에이전트 터미널 tail 읽기 → build_snapshot.
 
     warnings = 수집 중 경고를 누적할 list (실패 시 호출자가 실패 JSON 에 싣는다).
-    prompts = 세션 id(paneKey) → agent prompt 를 채울 dict (상세 페이지 transcript 탐색용).
+    prompts = 세션 id(paneKey) → (agent prompt, lastAssistantMessage) 를 채울 dict (상세 페이지 transcript 탐색용).
     """
     warnings = [] if warnings is None else warnings
     markdowns = _skill_markdowns(skills_dir, warnings)
@@ -1025,14 +1026,14 @@ def collect(
     return {**snapshot, "warnings": [*warnings, *snapshot["warnings"]]}
 
 
-def agent_prompts(worktrees: list[dict]) -> dict[str, str]:
-    """아카이브 아닌 worktree 의 agent paneKey → prompt."""
+def agent_prompts(worktrees: list[dict]) -> dict[str, tuple[str | None, str | None]]:
+    """아카이브 아닌 worktree 의 agent paneKey → (prompt, lastAssistantMessage) — transcript 매칭 키."""
     return {
-        agent.get("paneKey"): agent.get("prompt")
+        agent.get("paneKey"): (agent.get("prompt"), agent.get("lastAssistantMessage"))
         for worktree in worktrees
         if not worktree.get("isArchived")
         for agent in worktree.get("agents") or []
-        if agent.get("paneKey") and agent.get("prompt")
+        if agent.get("paneKey") and (agent.get("prompt") or agent.get("lastAssistantMessage"))
     }
 
 
@@ -1059,20 +1060,26 @@ class _FileMemo:
         return value
 
 
-def _read_last_user_request(path: str) -> str | None:
-    """파일 안 마지막 사용자 요청 텍스트 (user 줄만 JSON 파싱)."""
-    last = None
+def _read_match_texts(path: str) -> tuple[str | None, str | None]:
+    """파일 안 (마지막 사용자 요청, 마지막 assistant 텍스트 블록) — user·assistant 줄만 JSON 파싱."""
+    last_request = None
+    last_reply = None
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            if '"user"' not in line:
+            if '"user"' not in line and '"assistant"' not in line:
                 continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(record, dict):
-                last = _user_request_text(record) or last
-    return last
+            if not isinstance(record, dict):
+                continue
+            if record.get("type") == "user":
+                last_request = _user_request_text(record) or last_request
+            elif record.get("type") == "assistant":
+                texts = [text for text in _content_texts(_record_content(record)) if text.strip()]
+                last_reply = texts[-1] if texts else last_reply
+    return last_request, last_reply
 
 
 def _read_transcript(path: str) -> dict:
@@ -1080,14 +1087,19 @@ def _read_transcript(path: str) -> dict:
         return parse_transcript(handle)
 
 
-_LAST_REQUESTS = _FileMemo(_read_last_user_request)
+_MATCH_TEXTS = _FileMemo(_read_match_texts)
 _TRANSCRIPTS = _FileMemo(_read_transcript, max_entries=64)
 
 
-def find_transcript(directory: str, prompt: str | None) -> str | None:
-    """마지막 사용자 요청이 prompt 와 (공백 정규화 후 앞 60자) 같은 transcript. 여러 개면 mtime 최신."""
-    key = _match_key(prompt)
-    if not key:
+def find_transcript(directory: str, prompt: str | None, last_message: str | None = None) -> str | None:
+    """공백 정규화 후 앞 60자 비교로 transcript 선택 (mtime 최신 우선).
+
+    ① 마지막 사용자 요청 == prompt 인 파일. 없으면 ② 마지막 assistant 텍스트 == last_message 인 파일.
+    Orca prompt 는 같은 pane 의 하위 codex 입력으로 덮일 수 있어 ② 를 대체 키로 쓴다.
+    """
+    prompt_key = _match_key(prompt)
+    reply_key = _match_key(last_message)
+    if not prompt_key and not reply_key:
         return None
     try:
         names = os.listdir(directory)
@@ -1102,14 +1114,17 @@ def find_transcript(directory: str, prompt: str | None) -> str | None:
             continue
         if name.endswith(".jsonl"):
             candidates.append((stat.st_mtime_ns, path, stat))
+    reply_match = None
     for _, path, stat in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
         try:
-            request = _LAST_REQUESTS.get(path, stat)
+            request, reply = _MATCH_TEXTS.get(path, stat)
         except (OSError, UnicodeDecodeError):
             continue
-        if _match_key(request) == key:
+        if prompt_key and _match_key(request) == prompt_key:
             return path
-    return None
+        if reply_match is None and reply_key and _match_key(reply) == reply_key:
+            reply_match = path
+    return reply_match
 
 
 def load_transcript(path: str) -> dict:
@@ -1136,13 +1151,13 @@ class SnapshotStore:
         self._interval = interval
         self._lock = threading.Lock()
         self._snapshot = error_snapshot("아직 수집 전", now_millis())
-        self._prompts: dict[str, str] = {}
+        self._prompts: dict[str, tuple[str | None, str | None]] = {}
         self._last_success_at: int | None = None
 
     def refresh(self, command: list[str]) -> None:
         """수집 1회. 어떤 예외든 error 로 노출하고 직전 성공 스냅샷을 유지한다."""
         now_ms = now_millis()
-        prompts: dict[str, str] = {}
+        prompts: dict[str, tuple[str | None, str | None]] = {}
         try:
             snapshot = collect(command, SKILLS_DIR, now_ms, prompts=prompts)
         except Exception as error:  # noqa: BLE001 — 수집 스레드는 어떤 실패로도 죽지 않는다
@@ -1158,21 +1173,24 @@ class SnapshotStore:
         with self._lock:
             return {**self._snapshot, "interval": self._interval, "lastSuccessAt": self._last_success_at}
 
-    def session(self, session_id: str) -> tuple[dict, str | None] | None:
-        """최신 스냅샷의 세션과 그 agent prompt. 모르는 id 면 None."""
+    def session(self, session_id: str) -> tuple[dict, tuple[str | None, str | None]] | None:
+        """최신 스냅샷의 세션과 그 transcript 매칭 키 (prompt, lastAssistantMessage). 모르는 id 면 None."""
         with self._lock:
             for session in self._snapshot["sessions"]:
                 if session["id"] == session_id:
-                    return session, self._prompts.get(session_id)
+                    return session, self._prompts.get(session_id, (None, None))
         return None
 
 
-def session_detail(session: dict, prompt: str | None, projects_root: str, now_ms: int) -> dict:
+def session_detail(
+    session: dict, match_keys: tuple[str | None, str | None], projects_root: str, now_ms: int
+) -> dict:
     """세션 상세 응답. transcript 를 찾지 못하면 transcript false, 읽기 실패는 transcriptError 로 노출."""
-    if session.get("kind") != "agent" or not prompt or not session.get("path"):
+    prompt, last_message = match_keys
+    if session.get("kind") != "agent" or not (prompt or last_message) or not session.get("path"):
         return build_detail(session, None, now_ms=now_ms)
     try:
-        path = find_transcript(transcript_dir(projects_root, session["path"]), prompt)
+        path = find_transcript(transcript_dir(projects_root, session["path"]), prompt, last_message)
         transcript = load_transcript(path) if path is not None else None
     except (OSError, UnicodeDecodeError) as error:
         return {**build_detail(session, None, now_ms=now_ms), "transcriptError": f"transcript 읽기 실패: {error}"}
@@ -1203,8 +1221,8 @@ def _handler_for(store: SnapshotStore, projects_root: str):
             if found is None:
                 self._send_json(404, {"error": f"세션 없음: {session_id or '(id 미지정)'}"})
                 return
-            session, prompt = found
-            self._send_json(200, session_detail(session, prompt, projects_root, now_millis()))
+            session, match_keys = found
+            self._send_json(200, session_detail(session, match_keys, projects_root, now_millis()))
 
         def _send_json(self, status: int, payload: dict) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
