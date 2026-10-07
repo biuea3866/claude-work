@@ -3559,7 +3559,7 @@ def stepped_work_items():
 
 
 expect_predicate(
-    "Step 변화는 예고·연속 중복을 제외하고 title·70% basis 를 보존",
+    "Step 변화는 예고·연속 중복을 제외하고 title·60% basis 를 보존",
     stepped_work_items,
     lambda items: len(items) == 1
     and set(items[0])
@@ -3590,10 +3590,10 @@ expect_predicate(
     ]
     and items[0]["progress"]
     == {
-        "percent": 70,
+        "percent": 60,
         "basis": "/private-implement Step 7 (7/10단계 진행 중)",
     },
-    "stepPath [1, 3, 7], titled steps, and 70 percent",
+    "stepPath [1, 3, 7], titled steps, and 60 percent",
 )
 
 
@@ -3658,7 +3658,7 @@ expect_predicate(
     lambda items: items[0]["result"] == "interrupted"
     and items[0]["progress"]
     == {
-        "percent": 30,
+        "percent": 20,
         "basis": "/private-implement Step 3 (3/10단계에서 중단)",
     },
     "interrupted step 3 progress basis",
@@ -3770,9 +3770,9 @@ expect_predicate(
     preserved_progress_items,
     lambda items: len(items) == 2
     and items[0]["stepPath"] == [7]
-    and items[0]["progress"]["percent"] == 70
+    and items[0]["progress"]["percent"] == 60
     and items[1]["stepPath"] == [8],
-    "previous 70 percent remains after the next work reaches Step 8",
+    "previous 60 percent remains after the next work reaches Step 8",
 )
 
 
@@ -4625,7 +4625,7 @@ function detailPayload(id) {
     {id: "work-interrupted", title: "중단된 작업", startedAt: 140, endedAt: 150,
       requestCount: 1, pipeline: "private-roadmap", runId: null, stepPath: [3], finalStep: 3,
       steps: [{at: 145, step: 3, title: "검증"}],
-      progress: {percent: 33, basis: "/private-roadmap Step 3 (3/9단계에서 중단)"}, result: "interrupted",
+      progress: {percent: 22, basis: "/private-roadmap Step 3 (3/9단계에서 중단)"}, result: "interrupted",
       subagents: 0, backgroundShells: 1, failedTasks: 1},
     {id: "work-running", title: "현재 진행 중인 최신 작업", startedAt: 200, endedAt: 240,
       requestCount: 2, pipeline: "private-implement", runId: "runs/private-implement/20261007-ui",
