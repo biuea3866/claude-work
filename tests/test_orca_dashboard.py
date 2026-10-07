@@ -4892,6 +4892,202 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard h8 fixture ") as tempora
     )
 
 
+print("H9 isMeta 사용자 레코드 제외")
+
+
+def user_record_with_metadata(offset, text, *, uuid=None, **metadata):
+    record = json.loads(history_record("user", offset, text, uuid=uuid))
+    record.update(metadata)
+    return json.dumps(record, ensure_ascii=False)
+
+
+usage_limit_text = "[Usage limit reached] 사용 한도에 도달했습니다"
+auto_continuation_text = "Your claude.ai usage limit has reset. You can continue now."
+meta_user_lines = [
+    user_record_with_metadata(
+        120,
+        usage_limit_text,
+        uuid="meta-usage-limit",
+        isMeta=True,
+    ),
+    user_record_with_metadata(
+        121,
+        auto_continuation_text,
+        uuid="meta-auto-continuation",
+        isMeta=True,
+        origin={"kind": "auto-continuation"},
+    ),
+]
+plain_user_lines = [
+    history_record("user", 122, usage_limit_text, uuid="plain-usage-limit"),
+    history_record("user", 123, auto_continuation_text, uuid="plain-auto-continuation"),
+]
+
+expect_equal(
+    "isMeta user 는 parse_transcript prompts 에서 제외하고 같은 텍스트 일반 user 는 유지",
+    lambda: dashboard.parse_transcript(meta_user_lines + plain_user_lines)["prompts"],
+    [
+        {"at": utc_ms(history_timestamp(122)), "text": usage_limit_text},
+        {"at": utc_ms(history_timestamp(123)), "text": auto_continuation_text},
+    ],
+)
+expect_equal(
+    "isMeta user 는 split_work_items 에서 새 작업을 만들지 않음",
+    lambda: dashboard.split_work_items(
+        meta_user_lines,
+        pipelines=HISTORY_PIPELINES,
+    ),
+    [],
+)
+expect_equal(
+    "isMeta 없는 같은 텍스트는 split_work_items 요청으로 유지",
+    lambda: [
+        item["id"]
+        for item in dashboard.split_work_items(
+            plain_user_lines,
+            pipelines=HISTORY_PIPELINES,
+        )
+    ],
+    ["plain-usage-limit", "plain-auto-continuation"],
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard h9 transcript ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    meta_path = transcript_directory / "meta.jsonl"
+    meta_path.write_text(
+        "\n".join(
+            [
+                history_record(
+                    "user",
+                    119,
+                    "실제 사용자의 마지막 요청입니다",
+                    uuid="actual-last-request",
+                ),
+                *meta_user_lines,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plain_path = transcript_directory / "plain.jsonl"
+    plain_path.write_text(plain_user_lines[-1] + "\n", encoding="utf-8")
+    os.utime(plain_path, (100, 100))
+    os.utime(meta_path, (200, 200))
+    expect_equal(
+        "find_transcript ①의 마지막 요청은 뒤따른 isMeta user 가 아닌 실제 user",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            "실제 사용자의 마지막 요청입니다",
+        ),
+        str(meta_path),
+    )
+    expect_equal(
+        "find_transcript ①은 isMeta 없는 같은 텍스트만 요청으로 일치",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory),
+            auto_continuation_text,
+        ),
+        str(plain_path),
+    )
+
+
+print("H10 heredoc 본문의 run 디렉토리 신호 제외")
+
+
+def active_pipeline_with_bash(command):
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                130,
+                "활성 파이프라인의 heredoc 판정을 검증합니다",
+                uuid="heredoc-active-work",
+            ),
+            tool_use(
+                131,
+                "toolu-heredoc-skill",
+                "Skill",
+                {"skill": "private-implement", "args": "heredoc 판정"},
+            ),
+            tool_use(
+                132,
+                "toolu-current-run",
+                "Bash",
+                {
+                    "command": (
+                        "mkdir -p "
+                        "runs/private-implement/20200101-current"
+                    )
+                },
+            ),
+            tool_use(
+                133,
+                "toolu-heredoc-candidate",
+                "Bash",
+                {"command": command},
+                uuid="heredoc-candidate",
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+heredoc_variants = {
+    "<<'EOF'": "EOF",
+    "<<EOF": "EOF",
+    '<<"EOF"': "EOF",
+    "<<-EOF": "EOF",
+}
+for heredoc_opener, heredoc_closer in heredoc_variants.items():
+    heredoc_command = (
+        f"cat > f.md {heredoc_opener}\n"
+        "문서에 기록할 실행 예시입니다\n"
+        "mkdir -p runs/private-implement/20200101-other\n"
+        f"{heredoc_closer}"
+    )
+    expect_predicate(
+        f"활성 파이프라인은 {heredoc_opener} 본문의 다른 run id 로 분할하지 않음",
+        lambda command=heredoc_command: active_pipeline_with_bash(command),
+        lambda items: len(items) == 1
+        and items[0]["id"] == "heredoc-active-work"
+        and items[0]["runId"]
+        == "runs/private-implement/20200101-current",
+        "one active work item retaining only the current run id",
+    )
+
+expect_predicate(
+    "heredoc 밖 mkdir 의 다른 run id 는 기존대로 작업을 분할",
+    lambda: active_pipeline_with_bash(
+        "mkdir -p runs/private-implement/20200101-outside"
+    ),
+    lambda items: len(items) == 2
+    and [item["runId"] for item in items]
+    == [
+        "runs/private-implement/20200101-current",
+        "runs/private-implement/20200101-outside",
+    ],
+    "two work items split at the outside mkdir run id",
+)
+
+mixed_heredoc_command = (
+    "cat > f.md <<'EOF'\n"
+    "mkdir -p runs/private-implement/20200101-inside\n"
+    "EOF\n"
+    "mkdir -p runs/private-implement/20200101-outside"
+)
+expect_predicate(
+    "같은 Bash command 의 heredoc 밖 mkdir 만 run 신호로 사용",
+    lambda: active_pipeline_with_bash(mixed_heredoc_command),
+    lambda items: len(items) == 2
+    and [item["runId"] for item in items]
+    == [
+        "runs/private-implement/20200101-current",
+        "runs/private-implement/20200101-outside",
+    ],
+    "inside heredoc ignored and only outside mkdir splits the work",
+)
+
+
 print()
 if failures:
     print(f"실패 {len(failures)}건")
