@@ -66,6 +66,19 @@ def expect_predicate(name, action, predicate, expected_description):
     check(name, predicate(actual), f"expected {expected_description}, actual={actual!r}")
 
 
+def expect_exception(name, action, expected_type):
+    try:
+        action()
+    except Exception as error:
+        check(
+            name,
+            isinstance(error, expected_type),
+            f"expected {expected_type.__name__}, actual={type(error).__name__}: {error}",
+        )
+        return
+    check(name, False, f"expected {expected_type.__name__}, but no exception was raised")
+
+
 def status_result(**overrides):
     arguments = {
         "agent_state": "done",
@@ -248,6 +261,18 @@ expect_equal(
     lambda: dashboard.summarize([], None),
     {"text": None, "source": None},
 )
+expect_equal(
+    "코드 펜스로 시작한 lastMessage 는 첫 의미 있는 줄을 요약",
+    lambda: dashboard.summarize([], "```json\n\n# **수집 결과**\n```"),
+    {"text": "수집 결과", "source": "lastMessage"},
+)
+expect_equal(
+    "마크다운 표 행을 건너뛰고 기호를 제거한 줄을 요약",
+    lambda: dashboard.summarize(
+        [], "| 항목 | 값 |\n|---|---|\n> - **실행 결과**"
+    ),
+    {"text": "실행 결과", "source": "lastMessage"},
+)
 
 print("parse_step_headings · estimate_progress")
 roadmap_markdown = "\n".join(
@@ -278,6 +303,13 @@ expect_equal(
     {"percent": 100, "basis": "완료 보고"},
 )
 expect_equal(
+    "done 의 여러 줄 완료 보고는 전체 원문을 검사해 100%",
+    lambda: progress_result(
+        agent_state="done", texts=["검증 결과입니다.\n모든 작업을 완료했습니다."]
+    ),
+    {"percent": 100, "basis": "완료 보고"},
+)
+expect_equal(
     "working 의 머지 문구는 100% 아님",
     lambda: progress_result(agent_state="working", texts=["squash 머지했습니다"]),
     {"percent": None, "basis": "산정 불가"},
@@ -301,6 +333,15 @@ expect_equal(
         texts=["/private-roadmap Step 4 진행 중", "현재 Step 6 수행"]
     )["percent"],
     67,
+)
+expect_equal(
+    "현재 Step 과 다음 Step 이 함께 있으면 예고를 제외",
+    lambda: progress_result(
+        texts=[
+            "/private-roadmap 현재 Step 4 진행 중입니다. 다음은 Step 8입니다."
+        ]
+    )["percent"],
+    44,
 )
 expect_equal(
     "헤딩에 없는 Step 12 는 산정 불가",
@@ -640,6 +681,67 @@ expect_equal(
     {"total": 7, "running": 2, "waitingUser": 1, "blockedOrStale": 2},
 )
 
+completion_worktree = worktree(
+    "wt-completion",
+    agents=[
+        agent(
+            "tab-completion:leaf",
+            state="done",
+            lastAssistantMessage="검증 결과입니다.\n모든 작업을 완료했습니다.",
+        )
+    ],
+    liveTerminalCount=1,
+)
+completion_terminal = terminal(
+    "term-completion", "wt-completion", "tab-completion", "leaf"
+)
+expect_equal(
+    "build_snapshot 도 여러 줄 완료 원문으로 100% 판정",
+    lambda: dashboard.build_snapshot(
+        [completion_worktree],
+        [completion_terminal],
+        {"term-completion": []},
+        now_ms=NOW_MS,
+        pipelines=PIPELINES,
+    )["sessions"][0]["progress"],
+    {"percent": 100, "basis": "완료 보고"},
+)
+
+tail_error_worktree = worktree(
+    "wt-tail-error",
+    agents=[agent("tab-tail-error:leaf", state="done")],
+    liveTerminalCount=1,
+)
+tail_error_terminal = terminal(
+    "term-tail-error", "wt-tail-error", "tab-tail-error", "leaf"
+)
+expect_equal(
+    "terminal read 실패 세션은 stale 이고 snapshot warning 을 노출",
+    lambda: {
+        "warnings": snapshot["warnings"],
+        "status": snapshot["sessions"][0]["status"],
+        "reason": snapshot["sessions"][0]["reason"],
+    }
+    if (
+        snapshot := dashboard.build_snapshot(
+            [tail_error_worktree],
+            [tail_error_terminal],
+            {"term-tail-error": []},
+            now_ms=NOW_MS,
+            pipelines=PIPELINES,
+            tail_errors={"term-tail-error": "permission denied"},
+        )
+    )
+    else None,
+    {
+        "warnings": [
+            "terminal read 실패 term-tail-error: permission denied"
+        ],
+        "status": "stale",
+        "reason": "화면 읽기 실패 — 상태 판정 불가: permission denied",
+    },
+)
+
 print("orca_command")
 expect_equal(
     "ORCA_CLI_COMMAND 는 shlex.split",
@@ -650,14 +752,46 @@ expect_equal(
 )
 expect_equal("ORCA_CLI_COMMAND 미설정은 orca", lambda: dashboard.orca_command({}), ["orca"])
 
+print("run_orca 실행 실패")
+with tempfile.TemporaryDirectory(prefix="orca dashboard permission ") as temporary_directory:
+    non_executable = Path(temporary_directory) / "orca-no-execute"
+    non_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    non_executable.chmod(0o600)
+    expect_exception(
+        "실행 권한 없는 Orca 파일은 OrcaError",
+        lambda: dashboard.run_orca([str(non_executable)], ["worktree", "ps"]),
+        dashboard.OrcaError,
+    )
+expect_exception(
+    "없는 Orca 실행 파일은 OrcaError",
+    lambda: dashboard.run_orca(
+        ["/definitely/missing/orca-dashboard-test-binary"], ["worktree", "ps"]
+    ),
+    dashboard.OrcaError,
+)
+
 
 ORCA_STUB = r'''#!/usr/bin/env python3
 import json
+import os
 import sys
 
 arguments = sys.argv[1:]
 if arguments[-1:] == ["--json"]:
     arguments = arguments[:-1]
+
+cycle_file = os.environ.get("ORCA_STUB_CYCLE_FILE")
+if cycle_file and arguments == ["worktree", "ps"]:
+    try:
+        with open(cycle_file, encoding="utf-8") as handle:
+            cycle = int(handle.read()) + 1
+    except (FileNotFoundError, ValueError):
+        cycle = 1
+    with open(cycle_file, "w", encoding="utf-8") as handle:
+        handle.write(str(cycle))
+    if cycle == 2:
+        print(json.dumps({"ok": False, "error": "temporary collection failure"}))
+        raise SystemExit(0)
 
 if arguments == ["worktree", "ps"]:
     result = {
@@ -706,6 +840,9 @@ elif arguments == ["terminal", "list"]:
         }]
     }
 elif arguments[:2] == ["terminal", "read"]:
+    if os.environ.get("ORCA_STUB_READ_FAIL"):
+        print(json.dumps({"ok": False, "error": os.environ["ORCA_STUB_READ_FAIL"]}))
+        raise SystemExit(0)
     result = {
         "terminal": {
             "handle": "term-stub",
@@ -797,6 +934,37 @@ check(
         failure_process.stderr[-500:],
     ),
 )
+check(
+    "전체 수집 실패 snapshot 은 빈 warnings 배열 포함",
+    isinstance(failure_payload, dict) and failure_payload.get("warnings") == [],
+    f"payload={failure_payload!r}",
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard partial read ") as temporary_directory:
+    partial_failure_env = fixture_environment(temporary_directory)
+    partial_failure_env["ORCA_STUB_READ_FAIL"] = "permission denied"
+    partial_failure_process = subprocess.run(
+        [sys.executable, str(DASHBOARD_PATH), "snapshot"],
+        cwd=ROOT,
+        env=partial_failure_env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    partial_failure_payload = parse_stdout_json(partial_failure_process)
+    check(
+        "terminal read 만 실패한 snapshot 은 exit 0 + warning + stale 세션",
+        partial_failure_process.returncode == 0
+        and isinstance(partial_failure_payload, dict)
+        and bool(partial_failure_payload.get("warnings"))
+        and len(partial_failure_payload.get("sessions", [])) == 1
+        and partial_failure_payload["sessions"][0].get("status") == "stale",
+        "exit={} payload={!r} stderr={!r}".format(
+            partial_failure_process.returncode,
+            partial_failure_payload,
+            partial_failure_process.stderr[-500:],
+        ),
+    )
 
 
 def unused_local_port():
@@ -811,6 +979,35 @@ def http_response(url):
             return response.status, response.headers, response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
         return error.code, error.headers, error.read().decode("utf-8")
+
+
+def stop_process(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
+
+def wait_for_snapshot(process, port, predicate, timeout):
+    deadline = time.monotonic() + timeout
+    last_detail = "server did not become ready"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stderr = process.stderr.read() if process.stderr else ""
+            return None, f"server exited {process.returncode}: {stderr[-800:]}"
+        try:
+            status, _, body = http_response(f"http://127.0.0.1:{port}/api/snapshot")
+            payload = json.loads(body)
+            last_detail = f"status={status}, payload={payload!r}"
+            if status == 200 and predicate(payload):
+                return payload, ""
+        except (OSError, TimeoutError, json.JSONDecodeError) as error:
+            last_detail = f"{type(error).__name__}: {error}"
+        time.sleep(0.03)
+    return None, last_detail
 
 
 print("serve")
@@ -886,6 +1083,117 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard serve ") as temporary_di
             f"status={root_status}, headers={dict(root_headers)}, body={root_body[:500]!r}",
         )
         check("알 수 없는 HTTP 경로는 404", responses["missing"][0] == 404)
+
+print("serve 첫 수집 실행 실패")
+with tempfile.TemporaryDirectory(prefix="orca dashboard serve permission ") as temporary_directory:
+    non_executable = Path(temporary_directory) / "orca-no-execute"
+    non_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    non_executable.chmod(0o600)
+    permission_env = os.environ.copy()
+    permission_env["ORCA_CLI_COMMAND"] = shlex.join([str(non_executable)])
+    permission_port = unused_local_port()
+    permission_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(DASHBOARD_PATH),
+            "serve",
+            "--port",
+            str(permission_port),
+            "--interval",
+            "0.2",
+        ],
+        cwd=ROOT,
+        env=permission_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        permission_payload, permission_error = wait_for_snapshot(
+            permission_process,
+            permission_port,
+            lambda payload: bool(payload.get("error")),
+            timeout=5,
+        )
+    finally:
+        stop_process(permission_process)
+    check(
+        "serve 는 첫 PermissionError 수집 실패에도 기동해 error 노출",
+        isinstance(permission_payload, dict) and bool(permission_payload.get("error")),
+        permission_error,
+    )
+
+print("serve 성공 → 실패 → 성공 복구")
+with tempfile.TemporaryDirectory(prefix="orca dashboard serve recovery ") as temporary_directory:
+    recovery_env = fixture_environment(temporary_directory)
+    recovery_env["ORCA_STUB_CYCLE_FILE"] = str(
+        Path(temporary_directory) / "collection-cycle.txt"
+    )
+    recovery_port = unused_local_port()
+    recovery_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(DASHBOARD_PATH),
+            "serve",
+            "--port",
+            str(recovery_port),
+            "--interval",
+            "0.4",
+        ],
+        cwd=ROOT,
+        env=recovery_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    first_success = None
+    failed_cycle = None
+    recovered_cycle = None
+    recovery_detail = "success/failure/recovery cycle not observed"
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if recovery_process.poll() is not None:
+                stderr = recovery_process.stderr.read() if recovery_process.stderr else ""
+                recovery_detail = (
+                    f"server exited {recovery_process.returncode}: {stderr[-800:]}"
+                )
+                break
+            try:
+                status, _, body = http_response(
+                    f"http://127.0.0.1:{recovery_port}/api/snapshot"
+                )
+                payload = json.loads(body)
+                recovery_detail = f"status={status}, payload={payload!r}"
+                if first_success is None and payload.get("error") is None and payload.get("sessions"):
+                    first_success = payload
+                elif first_success is not None and failed_cycle is None and payload.get("error"):
+                    failed_cycle = payload
+                elif failed_cycle is not None and payload.get("error") is None and payload.get("sessions"):
+                    recovered_cycle = payload
+                    break
+            except (OSError, TimeoutError, json.JSONDecodeError):
+                pass
+            time.sleep(0.03)
+    finally:
+        stop_process(recovery_process)
+
+    expected_session_ids = (
+        [session["id"] for session in first_success["sessions"]]
+        if first_success is not None
+        else None
+    )
+    check(
+        "serve 는 실패 주기에 직전 sessions 유지 후 다음 성공에서 error 복구",
+        first_success is not None
+        and failed_cycle is not None
+        and recovered_cycle is not None
+        and [session["id"] for session in failed_cycle.get("sessions", [])]
+        == expected_session_ids
+        and [session["id"] for session in recovered_cycle.get("sessions", [])]
+        == expected_session_ids,
+        recovery_detail,
+    )
 
 print()
 if failures:
