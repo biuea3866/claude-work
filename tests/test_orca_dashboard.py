@@ -1591,6 +1591,805 @@ with tempfile.TemporaryDirectory(prefix="orca dashboard serve recovery ") as tem
         recovery_detail,
     )
 
+
+print("transcript_dir")
+expect_equal(
+    "Claude projects 경로는 cwd 비영숫자를 하이픈으로 인코딩",
+    lambda: dashboard.transcript_dir(
+        "/tmp/claude-projects", "/Users/biuea/.harness"
+    ),
+    "/tmp/claude-projects/-Users-biuea--harness",
+)
+expect_equal(
+    "경로의 공백·대괄호도 문자별 하이픈으로 인코딩",
+    lambda: dashboard.transcript_dir(
+        "/tmp/claude-projects", "/tmp/project name[1]"
+    ),
+    "/tmp/claude-projects/-tmp-project-name-1-",
+)
+
+
+def transcript_record(record_type, timestamp, content):
+    return json.dumps(
+        {
+            "type": record_type,
+            "timestamp": timestamp,
+            "message": {"content": content},
+        },
+        ensure_ascii=False,
+    )
+
+
+def write_transcript(path, prompt, timestamp="2026-10-07T09:00:00.000Z"):
+    path.write_text(
+        transcript_record("user", timestamp, prompt) + "\n",
+        encoding="utf-8",
+    )
+
+
+print("find_transcript")
+with tempfile.TemporaryDirectory(prefix="orca dashboard transcripts ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    matching_transcript = transcript_directory / "matching.jsonl"
+    matching_transcript.write_text(
+        transcript_record(
+            "user", "2026-10-07T08:59:00.000Z", "이전 사용자 요청"
+        )
+        + "\n"
+        + transcript_record(
+            "user",
+            "2026-10-07T09:00:00.000Z",
+            "세션   상세\n페이지를 구현해 주세요",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    expect_equal(
+        "마지막 사용자 요청과 공백 정규화 후 일치하는 transcript 1개 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "세션 상세 페이지를 구현해 주세요"
+        ),
+        str(matching_transcript),
+    )
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard latest transcript ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    older_transcript = transcript_directory / "older.jsonl"
+    newer_transcript = transcript_directory / "newer.jsonl"
+    write_transcript(older_transcript, "동일한 요청")
+    write_transcript(newer_transcript, "동일한 요청")
+    os.utime(older_transcript, (100, 100))
+    os.utime(newer_transcript, (200, 200))
+    expect_equal(
+        "일치 transcript 2개면 mtime 최신 파일 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "동일한 요청"
+        ),
+        str(newer_transcript),
+    )
+    expect_equal(
+        "사용자 요청이 불일치하면 transcript 없음",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "다른 요청"
+        ),
+        None,
+    )
+    expect_equal(
+        "prompt None 이면 transcript 없음",
+        lambda: dashboard.find_transcript(str(transcript_directory), None),
+        None,
+    )
+
+expect_equal(
+    "transcript 디렉토리가 없으면 None",
+    lambda: dashboard.find_transcript(
+        "/definitely/missing/orca-dashboard-transcripts", "요청"
+    ),
+    None,
+)
+
+with tempfile.TemporaryDirectory(prefix="orca dashboard broken transcript ") as temporary_directory:
+    transcript_directory = Path(temporary_directory)
+    broken_transcript = transcript_directory / "broken.jsonl"
+    broken_transcript.mkdir()
+    valid_transcript = transcript_directory / "valid.jsonl"
+    write_transcript(valid_transcript, "깨진 파일을 건너뛰는 요청")
+    expect_equal(
+        "읽기 실패 transcript 는 건너뛰고 일치 파일 선택",
+        lambda: dashboard.find_transcript(
+            str(transcript_directory), "깨진 파일을 건너뛰는 요청"
+        ),
+        str(valid_transcript),
+    )
+
+
+from datetime import datetime
+
+
+def utc_ms(timestamp):
+    return int(datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def notification(tool_use_id, status, summary):
+    return (
+        "<task-notification>\n"
+        f"<tool-use-id>{tool_use_id}</tool-use-id>\n"
+        f"<status>{status}</status>\n"
+        f"<summary>{summary}</summary>\n"
+        "</task-notification>"
+    )
+
+
+TRANSCRIPT_TIMESTAMPS = [
+    f"2026-10-07T09:00:{second:02d}.000Z" for second in range(24)
+]
+TRANSCRIPT_LINES = [
+    transcript_record("user", TRANSCRIPT_TIMESTAMPS[0], "첫 요청\n세부 설명"),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[1],
+        notification("toolu_untracked", "completed", "알림은 prompt 가 아님"),
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[2],
+        [{"type": "text", "text": "  둘째 요청"}],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[3],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_agent_running",
+                "name": "Agent",
+                "input": {
+                    "description": "실행 중 서브에이전트",
+                    "subagent_type": "Explore",
+                    "model": "opus",
+                    "prompt": "계약을 조사한다",
+                    "run_in_background": True,
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[4],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_agent_done",
+                "name": "Task",
+                "input": {
+                    "description": "완료된 서브에이전트",
+                    "subagent_type": "general-purpose",
+                    "model": "sonnet",
+                    "prompt": "테스트를 작성한다",
+                    "run_in_background": True,
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[5],
+        [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_agent_done",
+                "content": "Async agent launched",
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[6],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_shell_ok",
+                "name": "Bash",
+                "input": {
+                    "command": "python3 tests/test_orca_dashboard.py",
+                    "description": "성공 셸",
+                    "run_in_background": True,
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[7],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_shell_failed",
+                "name": "Bash",
+                "input": {
+                    "command": "false",
+                    "description": "실패 셸",
+                    "run_in_background": True,
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[8],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_shell_killed",
+                "name": "Bash",
+                "input": {
+                    "command": "sleep 10",
+                    "run_in_background": True,
+                },
+            }
+        ],
+    ),
+    "{broken json line",
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[10],
+        notification(
+            "toolu_agent_done", "completed", "서브에이전트 작업 완료"
+        ),
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[11],
+        [
+            {
+                "type": "text",
+                "text": notification(
+                    "toolu_shell_ok",
+                    "completed",
+                    'Background command "tests" completed (exit code 0)',
+                ),
+            }
+        ],
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[12],
+        notification(
+            "toolu_shell_failed",
+            "completed",
+            'Background command "false" completed (exit code 2)',
+        ),
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[13],
+        notification("toolu_shell_killed", "killed", "사용자가 작업을 중단함"),
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[14],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_foreground_done",
+                "name": "Agent",
+                "input": {
+                    "description": "포그라운드 완료",
+                    "subagent_type": "Explore",
+                    "prompt": "확인한다",
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[15],
+        [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_foreground_done",
+                "content": "결과",
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[16],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_foreground_failed",
+                "name": "Task",
+                "input": {
+                    "description": "포그라운드 실패",
+                    "subagent_type": "general-purpose",
+                    "prompt": "실패한다",
+                    "run_in_background": False,
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "user",
+        TRANSCRIPT_TIMESTAMPS[17],
+        [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_foreground_failed",
+                "is_error": True,
+                "content": "오류",
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[18],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_foreground_running",
+                "name": "Agent",
+                "input": {
+                    "description": "포그라운드 실행 중",
+                    "subagent_type": "Explore",
+                    "prompt": "계속 실행한다",
+                },
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[19],
+        [
+            {
+                "type": "tool_use",
+                "id": "toolu_foreground_bash",
+                "name": "Bash",
+                "input": {"command": "pwd", "description": "일반 셸"},
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[20],
+        [
+            {
+                "type": "text",
+                "text": "현재 Step 4 진행 중입니다. Step 8은 다음 단계입니다.",
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[21],
+        [{"type": "text", "text": "Step 4 검증을 계속합니다."}],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[22],
+        [
+            {
+                "type": "text",
+                "text": "Step 6 구현 중입니다. 다음은 Step 8입니다.",
+            }
+        ],
+    ),
+    transcript_record(
+        "assistant",
+        TRANSCRIPT_TIMESTAMPS[23],
+        [{"type": "text", "text": "진행 상태를 기록합니다."}],
+    ),
+]
+
+
+def parsed_transcript():
+    return dashboard.parse_transcript(TRANSCRIPT_LINES)
+
+
+print("parse_transcript")
+expect_equal(
+    "prompt 는 task-notification·tool_result 전용 user 줄을 제외",
+    lambda: parsed_transcript()["prompts"],
+    [
+        {"at": utc_ms(TRANSCRIPT_TIMESTAMPS[0]), "text": "첫 요청"},
+        {"at": utc_ms(TRANSCRIPT_TIMESTAMPS[2]), "text": "둘째 요청"},
+    ],
+)
+expect_equal(
+    "tasks 는 추적 대상 시작순으로 반환",
+    lambda: [task["id"] for task in parsed_transcript()["tasks"]],
+    [
+        "toolu_agent_running",
+        "toolu_agent_done",
+        "toolu_shell_ok",
+        "toolu_shell_failed",
+        "toolu_shell_killed",
+        "toolu_foreground_done",
+        "toolu_foreground_failed",
+        "toolu_foreground_running",
+    ],
+)
+expect_predicate(
+    "task 항목은 공개 키 집합을 모두 포함",
+    lambda: parsed_transcript()["tasks"],
+    lambda tasks: all(
+        set(task)
+        == {
+            "id",
+            "kind",
+            "title",
+            "agentType",
+            "model",
+            "background",
+            "state",
+            "startedAt",
+            "endedAt",
+            "summary",
+        }
+        for task in tasks
+    ),
+    "every task has exactly the public task keys",
+)
+expect_equal(
+    "백그라운드 shell 은 제목·시각·종료 요약을 공개 계약대로 반환",
+    lambda: {
+        task["id"]: task for task in parsed_transcript()["tasks"]
+    }["toolu_shell_ok"],
+    {
+        "id": "toolu_shell_ok",
+        "kind": "shell",
+        "title": "성공 셸",
+        "agentType": None,
+        "model": None,
+        "background": True,
+        "state": "completed",
+        "startedAt": utc_ms(TRANSCRIPT_TIMESTAMPS[6]),
+        "endedAt": utc_ms(TRANSCRIPT_TIMESTAMPS[11]),
+        "summary": 'Background command "tests" completed (exit code 0)',
+    },
+)
+expect_predicate(
+    "백그라운드 agent 는 알림 없으면 running, 알림 있으면 completed",
+    lambda: {task["id"]: task for task in parsed_transcript()["tasks"]},
+    lambda tasks: tasks["toolu_agent_running"]["state"] == "running"
+    and tasks["toolu_agent_running"]["endedAt"] is None
+    and tasks["toolu_agent_done"]["state"] == "completed"
+    and tasks["toolu_agent_done"]["endedAt"]
+    == utc_ms(TRANSCRIPT_TIMESTAMPS[10])
+    and tasks["toolu_agent_done"]["agentType"] == "general-purpose"
+    and tasks["toolu_agent_done"]["model"] == "sonnet"
+    and tasks["toolu_agent_done"]["background"] is True,
+    "background agent running/completed states and public metadata",
+)
+expect_predicate(
+    "백그라운드 shell exit code 0 은 completed, exit code 2 는 failed",
+    lambda: {task["id"]: task for task in parsed_transcript()["tasks"]},
+    lambda tasks: tasks["toolu_shell_ok"]["state"] == "completed"
+    and tasks["toolu_shell_failed"]["state"] == "failed"
+    and tasks["toolu_shell_failed"]["summary"].endswith("(exit code 2)"),
+    "exit-code based shell states",
+)
+expect_predicate(
+    "백그라운드 status killed 는 failed",
+    lambda: {task["id"]: task for task in parsed_transcript()["tasks"]},
+    lambda tasks: tasks["toolu_shell_killed"]["state"] == "failed"
+    and tasks["toolu_shell_killed"]["title"] == "sleep 10",
+    "killed shell failed with command fallback title",
+)
+expect_predicate(
+    "포그라운드 Agent 는 tool_result 성공·오류·없음에 따라 상태 판정",
+    lambda: {task["id"]: task for task in parsed_transcript()["tasks"]},
+    lambda tasks: tasks["toolu_foreground_done"]["state"] == "completed"
+    and tasks["toolu_foreground_failed"]["state"] == "failed"
+    and tasks["toolu_foreground_running"]["state"] == "running"
+    and tasks["toolu_foreground_done"]["background"] is False,
+    "foreground Agent completed/failed/running states",
+)
+expect_predicate(
+    "run_in_background 없는 Bash 는 tasks 에서 제외",
+    lambda: parsed_transcript()["tasks"],
+    lambda tasks: "toolu_foreground_bash" not in {task["id"] for task in tasks},
+    "foreground Bash id absent",
+)
+expect_equal(
+    "Step 은 예고 문장을 제외하고 값이 바뀐 시점만 기록",
+    lambda: parsed_transcript()["steps"],
+    [
+        {"at": utc_ms(TRANSCRIPT_TIMESTAMPS[20]), "step": 4},
+        {"at": utc_ms(TRANSCRIPT_TIMESTAMPS[22]), "step": 6},
+    ],
+)
+expect_equal(
+    "깨진 JSON 줄을 건너뛰고 마지막 활동 시각 반환",
+    lambda: parsed_transcript()["lastActivityAt"],
+    utc_ms(TRANSCRIPT_TIMESTAMPS[23]),
+)
+
+
+DETAIL_SESSION = {
+    "id": "session-detail",
+    "name": "상세 세션",
+    "agentType": "claude",
+    "agentState": "working",
+    "toolName": "Agent",
+    "status": "blocked",
+    "reason": "승인이 필요합니다",
+    "progress": {"percent": 44, "basis": "/private-roadmap Step 4"},
+    "checklist": None,
+}
+DETAIL_TRANSCRIPT = {
+    "prompts": [{"at": 100, "text": "상세 페이지를 구현해 주세요"}],
+    "steps": [{"at": 200, "step": 4}],
+    "tasks": [
+        {
+            "id": "running-old",
+            "kind": "agent",
+            "title": "기존 실행 작업",
+            "agentType": "Explore",
+            "model": "opus",
+            "background": True,
+            "state": "running",
+            "startedAt": 400,
+            "endedAt": None,
+            "summary": None,
+        },
+        {
+            "id": "failed",
+            "kind": "shell",
+            "title": "실패 작업",
+            "agentType": None,
+            "model": None,
+            "background": True,
+            "state": "failed",
+            "startedAt": 500,
+            "endedAt": 700,
+            "summary": "exit code 2",
+        },
+        {
+            "id": "completed",
+            "kind": "agent",
+            "title": "완료 작업",
+            "agentType": "general-purpose",
+            "model": "sonnet",
+            "background": False,
+            "state": "completed",
+            "startedAt": 600,
+            "endedAt": 800,
+            "summary": "완료됨",
+        },
+        {
+            "id": "running-new",
+            "kind": "shell",
+            "title": "최신 실행 작업",
+            "agentType": None,
+            "model": None,
+            "background": True,
+            "state": "running",
+            "startedAt": 900,
+            "endedAt": None,
+            "summary": None,
+        },
+    ],
+    "lastActivityAt": 900,
+}
+
+
+def built_detail():
+    return dashboard.build_detail(
+        DETAIL_SESSION, DETAIL_TRANSCRIPT, now_ms=NOW_MS
+    )
+
+
+print("build_detail")
+expect_equal(
+    "children 은 running 우선 뒤 최신 시작순 정렬",
+    lambda: [child["id"] for child in built_detail()["agents"]["children"]],
+    ["running-new", "running-old", "completed", "failed"],
+)
+expect_equal(
+    "agents main 은 세션 공개 필드로 조립",
+    lambda: built_detail()["agents"]["main"],
+    {
+        "name": "상세 세션",
+        "agentType": "claude",
+        "state": "working",
+        "toolName": "Agent",
+    },
+)
+expect_equal(
+    "timeline 은 kind·문구를 시간순으로 조립",
+    lambda: built_detail()["timeline"],
+    [
+        {"at": 100, "kind": "prompt", "text": "상세 페이지를 구현해 주세요"},
+        {"at": 200, "kind": "step", "text": "Step 4 진입"},
+        {"at": 400, "kind": "task_start", "text": "기존 실행 작업 시작"},
+        {"at": 500, "kind": "task_start", "text": "실패 작업 시작"},
+        {"at": 600, "kind": "task_start", "text": "완료 작업 시작"},
+        {"at": 700, "kind": "task_end", "text": "실패 작업 실패"},
+        {"at": 800, "kind": "task_end", "text": "완료 작업 완료"},
+        {"at": 900, "kind": "task_start", "text": "최신 실행 작업 시작"},
+    ],
+)
+expect_equal(
+    "blockers 는 session blocked 와 failed task 를 함께 노출",
+    lambda: built_detail()["blockers"],
+    [
+        {"source": "session", "text": "승인이 필요합니다"},
+        {"source": "task", "text": "실패 작업 실패: exit code 2"},
+    ],
+)
+
+timeline_limit_transcript = {
+    "prompts": [
+        {"at": number, "text": f"요청 {number}"} for number in range(31)
+    ],
+    "steps": [
+        {"at": 100 + number, "step": number} for number in range(30)
+    ],
+    "tasks": [],
+    "lastActivityAt": 129,
+}
+expect_predicate(
+    "timeline 은 시간순 최근 60개만 유지",
+    lambda: dashboard.build_detail(
+        DETAIL_SESSION, timeline_limit_transcript, now_ms=NOW_MS
+    )["timeline"],
+    lambda timeline: len(timeline) == 60
+    and timeline[0] == {"at": 1, "kind": "prompt", "text": "요청 1"}
+    and timeline[-1] == {"at": 129, "kind": "step", "text": "Step 29 진입"},
+    "60 chronological events with the oldest event dropped",
+)
+expect_equal(
+    "transcript None 이면 children·timeline 은 비고 transcript false",
+    lambda: {
+        "children": detail["agents"]["children"],
+        "timeline": detail["timeline"],
+        "blockers": detail["blockers"],
+        "transcript": detail["transcript"],
+    }
+    if (
+        detail := dashboard.build_detail(
+            DETAIL_SESSION, None, now_ms=NOW_MS
+        )
+    )
+    else None,
+    {
+        "children": [],
+        "timeline": [],
+        "blockers": [{"source": "session", "text": "승인이 필요합니다"}],
+        "transcript": False,
+    },
+)
+
+
+def has_detail_state_tokens(html):
+    dark_marker = "@media (prefers-color-scheme: dark)"
+    if dark_marker not in html:
+        return False
+    light_css, dark_css = html.split(dark_marker, 1)
+    for state in ("running", "completed", "failed"):
+        token_pattern = re.compile(
+            rf"--[a-z0-9-]*{state}[a-z0-9-]*\s*:", re.IGNORECASE
+        )
+        if not token_pattern.search(light_css) or not token_pattern.search(dark_css):
+            return False
+    return True
+
+
+def avoids_data_inner_html(html):
+    assignments = re.findall(r"\.innerHTML\s*=\s*([^;\n]+)", html)
+    return all(value.strip() in ('""', "''", "``") for value in assignments)
+
+
+print("serve session detail · detail UI")
+with tempfile.TemporaryDirectory(prefix="orca dashboard detail serve ") as temporary_directory:
+    detail_env = fixture_environment(temporary_directory)
+    detail_env["CLAUDE_PROJECTS_DIR"] = str(
+        Path(temporary_directory) / "claude-projects"
+    )
+    Path(detail_env["CLAUDE_PROJECTS_DIR"]).mkdir()
+    detail_port = unused_local_port()
+    detail_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(DASHBOARD_PATH),
+            "serve",
+            "--port",
+            str(detail_port),
+            "--interval",
+            "0.1",
+        ],
+        cwd=ROOT,
+        env=detail_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    detail_ready = None
+    detail_ready_error = "server did not become ready"
+    existing_detail_response = None
+    missing_detail_response = None
+    detail_root_response = None
+    try:
+        detail_ready, detail_ready_error = wait_for_snapshot(
+            detail_process,
+            detail_port,
+            lambda payload: any(
+                session.get("id") == "tab-stub:leaf-stub"
+                for session in payload.get("sessions", [])
+            ),
+            timeout=5,
+        )
+        if detail_ready is not None:
+            existing_detail_response = http_response(
+                f"http://127.0.0.1:{detail_port}/api/session?id=tab-stub:leaf-stub"
+            )
+            missing_detail_response = http_response(
+                f"http://127.0.0.1:{detail_port}/api/session?id=missing-session"
+            )
+            detail_root_response = http_response(
+                f"http://127.0.0.1:{detail_port}/"
+            )
+    finally:
+        stop_process(detail_process)
+
+    existing_detail_payload = None
+    missing_detail_payload = None
+    if existing_detail_response is not None:
+        try:
+            existing_detail_payload = json.loads(existing_detail_response[2])
+        except json.JSONDecodeError:
+            pass
+    if missing_detail_response is not None:
+        try:
+            missing_detail_payload = json.loads(missing_detail_response[2])
+        except json.JSONDecodeError:
+            pass
+
+    check(
+        "/api/session 기존 id 는 200 JSON 과 상세 키 집합 반환",
+        existing_detail_response is not None
+        and existing_detail_response[0] == 200
+        and existing_detail_response[1].get_content_type() == "application/json"
+        and isinstance(existing_detail_payload, dict)
+        and set(existing_detail_payload)
+        == {"session", "agents", "timeline", "blockers", "transcript"}
+        and existing_detail_payload.get("transcript") is False,
+        detail_ready_error
+        if detail_ready is None
+        else f"response={existing_detail_response!r}, payload={existing_detail_payload!r}",
+    )
+    check(
+        "/api/session 없는 id 는 404 error JSON",
+        missing_detail_response is not None
+        and missing_detail_response[0] == 404
+        and missing_detail_response[1].get_content_type() == "application/json"
+        and isinstance(missing_detail_payload, dict)
+        and set(missing_detail_payload) == {"error"}
+        and bool(missing_detail_payload["error"]),
+        detail_ready_error
+        if detail_ready is None
+        else f"response={missing_detail_response!r}, payload={missing_detail_payload!r}",
+    )
+
+    detail_html = detail_root_response[2] if detail_root_response is not None else ""
+    check(
+        "/ HTML 은 api/session 호출과 hash 라우팅 포함",
+        "/api/session" in detail_html
+        and ("hashchange" in detail_html or "location.hash" in detail_html),
+        "detail API or hash route missing",
+    )
+    check(
+        "/ HTML 은 running·completed·failed 라이트·다크 토큰 포함",
+        has_detail_state_tokens(detail_html),
+        "detail state tokens missing in light or dark CSS",
+    )
+    check(
+        "/ HTML 은 데이터 렌더링에 innerHTML 대입을 사용하지 않음",
+        avoids_data_inner_html(detail_html),
+        "non-empty innerHTML assignment found",
+    )
+
 print()
 if failures:
     print(f"실패 {len(failures)}건")
