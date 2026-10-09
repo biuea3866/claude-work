@@ -107,7 +107,7 @@ COMMAND_NAME_RE = re.compile(r"<command-name>/([^<\s]+)</command-name>")
 COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 REQUEST_COMMAND_PREFIX = "private-"  # 등록 파이프라인 슬래시 호출만 요청 (parse_transcript 는 pipelines 를 모른다)
 RUN_DIRECTORY_RE = re.compile(r"runs/([a-z][a-z0-9-]*)/(\d{8}-[a-z0-9-]+)")
-HEREDOC_START_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+HEREDOC_START_RE = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 SHORT_FOLLOWUP_RE = re.compile(
     r"(?:승인|머지|푸시|커밋|진행|계속|이어서|좋아|고고)(?:해|해줘|해 줘|해요|하자|해주세요)?"
     r"|네|응|ㅇㅇ|ok|yes|넵|예|\d{1,2}번?",
@@ -342,8 +342,7 @@ def _completed_progress() -> dict:
 
 
 def _completion_progress(agent_state: str | None, texts: list[str]) -> dict | None:
-    if agent_state != "done":
-        return None
+    """H30 — 머지 완료 신호는 agent_state 와 무관 (카드·체크리스트·작업 히스토리·관측 공통)."""
     latest = next((text for text in _texts_newest_first(texts) if text.strip()), None)
     if latest is None or not completion_signal(latest):
         return None
@@ -860,14 +859,16 @@ def strip_heredocs(command: str) -> str:
     here-string(`<<<`)은 heredoc 이 아니다. 닫히지 않은 heredoc 은 끝까지 본문으로 본다(보수적).
     """
     kept: list[str] = []
-    pending: list[str] = []
+    pending: list[tuple[str, bool]] = []  # (구분자, `<<-` 여부)
     for line in command.split("\n"):
         if pending:
-            if line.strip() == pending[0]:
+            delimiter, strip_tabs = pending[0]
+            # H31 — `<<` 는 정확히 같은 줄만, `<<-` 는 선행 탭만 제거 후 일치
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
                 pending.pop(0)
             continue
         kept.append(line)
-        pending = [match.group(2) for match in HEREDOC_START_RE.finditer(line)]
+        pending = [(match.group(3), match.group(1) == "-") for match in HEREDOC_START_RE.finditer(line)]
     return "\n".join(kept)
 
 
@@ -1938,8 +1939,13 @@ class HistoryStore:
             return [f"history 기록 실패 {self._path}: {error}"]
 
     def _write_locked(self, changes: list[dict], directory: str) -> list[str]:
-        """호출자가 LOCK_EX 를 잡은 상태. append 실패·압축 실패는 경고 목록 (예외 없음)."""
+        """호출자가 LOCK_EX 를 잡은 상태. append 실패·압축 실패는 경고 목록 (예외 없음).
+
+        H32 — 잠금 안에서 파일의 영속 최신 점과 다시 비교해 변화분만 append 한다 (다른 writer 가 먼저 기록한
+        같은 상태를 중복 기록하지 않음). 메모리 사본도 영속 상태로 맞춘다.
+        """
         try:
+            changes = self._unpersisted(changes)
             self._append(changes)
         except OSError as error:
             return [f"history 기록 실패 {self._path}: {error}"]
@@ -1952,8 +1958,27 @@ class HistoryStore:
             return [f"history 기록 실패 {self._path}: 압축 실패 — {error}"]
         return []
 
+    def _unpersisted(self, changes: list[dict]) -> list[dict]:
+        """영속 파일의 세션별 마지막 점과 추적 필드가 다른 점만. 메모리 사본 = 영속 상태."""
+        try:
+            with open(self._path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except FileNotFoundError:
+            lines = []
+        persisted = parse_history(lines)
+        self._points = persisted
+        self._line_count = len(lines)
+        fresh = []
+        for point in changes:
+            previous = (persisted.get(point["sessionId"]) or [None])[-1]
+            if previous is None or any(previous.get(field) != point.get(field) for field in HISTORY_TRACKED_FIELDS):
+                fresh.append(point)
+        return fresh
+
     def _append(self, changes: list[dict]) -> None:
         """끝이 개행이 아니면(잘린 줄) 먼저 개행 후 append. 호출자가 flock 을 잡는다."""
+        if not changes:
+            return
         with open(self._path, "a+b") as handle:
             size = handle.seek(0, os.SEEK_END)
             broken_tail = False
