@@ -367,9 +367,9 @@ expect_equal(
     {"percent": None, "basis": "산정 불가"},
 )
 expect_equal(
-    "working 의 머지 문구는 100% 아님",
+    "working 의 머지 완료 보고도 100%",
     lambda: progress_result(agent_state="working", texts=["squash 머지했습니다"]),
-    {"percent": None, "basis": "산정 불가"},
+    {"percent": 100, "basis": "완료 보고"},
 )
 expect_predicate(
     "private-roadmap Step 4 는 44%와 근거",
@@ -6065,19 +6065,42 @@ def h28_consistency_observation(text, pipeline, offset, agent_state):
         pipelines=HISTORY_PIPELINES,
         step_titles=HISTORY_STEP_TITLES,
     )
-    checklist = dashboard.pipeline_checklist(
-        agent_state=agent_state,
-        texts=[text],
+    session = dashboard.build_snapshot(
+        [
+            worktree(
+                f"wt-h28-{offset}",
+                agents=[
+                    agent(
+                        f"tab-h28-{offset}:leaf",
+                        state=agent_state,
+                        mainAgent={"state": agent_state},
+                        prompt=slash_request(pipeline, "판정 일관성"),
+                        lastAssistantMessage=text,
+                    )
+                ],
+                liveTerminalCount=1,
+            )
+        ],
+        [
+            terminal(
+                f"term-h28-{offset}",
+                f"wt-h28-{offset}",
+                f"tab-h28-{offset}",
+                "leaf",
+            )
+        ],
+        {f"term-h28-{offset}": []},
+        now_ms=NOW_MS,
         pipelines=HISTORY_PIPELINES,
         step_titles=HISTORY_STEP_TITLES,
-    )
+    )["sessions"][0]
+    checklist = session["checklist"]
     series = dashboard.progress_series(items, [], HISTORY_PIPELINES)
     return {
-        "card": progress_result(
-            agent_state=agent_state, texts=[text], pipelines=HISTORY_PIPELINES
-        ),
+        "card": session["progress"],
         "allDone": checklist is not None
         and all(step["state"] == "done" for step in checklist["steps"]),
+        "historyPoint": dashboard.history_point(session, NOW_MS),
         "item": items[0],
         "series": series,
     }
@@ -6123,6 +6146,8 @@ for label, text, pipeline, offset, agent_state, completed, percent in (
         and result["item"]["result"]
         == ("completed" if completed else "in_progress")
         and result["item"]["progress"]["percent"] == percent
+        and result["historyPoint"]["percent"] == percent
+        and result["historyPoint"]["basis"] == result["card"]["basis"]
         and result["series"]
         and result["series"][-1]["percent"] == percent,
         f"all current surfaces at {percent} percent and completed={completed}",
@@ -6216,6 +6241,220 @@ expect_predicate(
     and result[1]["finalStep"] == 3
     and result[1]["progress"] == result[0],
     "Step 3 and 20 percent on card and work history",
+)
+
+
+print("H30 agent_state 와 무관한 머지 완료 판정")
+
+
+def h30_working_merge_observation():
+    return h28_consistency_observation(
+        "/private-implement 현재 Step 4 작업을 PR 에 머지했습니다.",
+        "private-implement",
+        270,
+        "working",
+    )
+
+
+expect_predicate(
+    "H30 working + 머지 보고는 카드·체크리스트·history_point·작업이 모두 완료",
+    h30_working_merge_observation,
+    lambda result: result["card"] == {"percent": 100, "basis": "완료 보고"}
+    and result["allDone"]
+    and result["historyPoint"]["percent"] == 100
+    and result["historyPoint"]["basis"] == "완료 보고"
+    and result["item"]["result"] == "completed"
+    and result["item"]["progress"] == {"percent": 100, "basis": "완료 보고"},
+    "100 percent completion with 완료 보고 basis on all four surfaces",
+)
+
+
+print("H31 heredoc 구분자 정확 종료")
+for label, command, starts_run in (
+    (
+        "일반 heredoc 의 공백 들여쓴 EOF",
+        "cat <<'EOF'\n"
+        " EOF\n"
+        "mkdir -p runs/private-roadmap/20261007-example\n"
+        "EOF",
+        False,
+    ),
+    (
+        "일반 heredoc 의 후행 공백 EOF",
+        "cat <<'EOF'\n"
+        "EOF \n"
+        "mkdir -p runs/private-roadmap/20261007-example\n"
+        "EOF",
+        False,
+    ),
+    (
+        "탭 제거 heredoc 의 탭 들여쓴 EOF",
+        "cat <<-EOF\n"
+        "\tEOF\n"
+        "mkdir -p runs/private-roadmap/20261007-example",
+        True,
+    ),
+    (
+        "탭 제거 heredoc 의 공백 들여쓴 EOF",
+        "cat <<-EOF\n"
+        " EOF\n"
+        "mkdir -p runs/private-roadmap/20261007-example\n"
+        "EOF",
+        False,
+    ),
+):
+    expect_predicate(
+        f"H31 {label} 종료 판정",
+        lambda command=command: work_with_mkdir_candidate(command),
+        (
+            lambda items: len(items) == 1
+            and items[0]["pipeline"] == "private-roadmap"
+            and items[0]["runId"]
+            == "runs/private-roadmap/20261007-example"
+        )
+        if starts_run
+        else (
+            lambda items: len(items) == 1
+            and items[0]["pipeline"] is None
+            and items[0]["runId"] is None
+        ),
+        "run signal only after an exactly terminated heredoc",
+    )
+
+
+print("H32 잠금 안 영속 최신 점 비교")
+
+
+def two_history_store_same_state_observation():
+    with tempfile.TemporaryDirectory(prefix="orca dashboard same state stores ") as temporary_directory:
+        path = Path(temporary_directory) / "history.jsonl"
+        snapshot = {"error": None, "sessions": [history_session("shared-session")]}
+        first_store = dashboard.HistoryStore(str(path))
+        second_store = dashboard.HistoryStore(str(path))
+        first_load_warnings = first_store.load()
+        second_load_warnings = second_store.load()
+        first_record_warnings = first_store.record(snapshot, 50_000)
+        second_record_warnings = second_store.record(snapshot, 50_001)
+        reloaded = dashboard.HistoryStore(str(path))
+        reload_warnings = reloaded.load()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return (
+            first_load_warnings,
+            second_load_warnings,
+            first_record_warnings,
+            second_record_warnings,
+            reload_warnings,
+            lines,
+            reloaded.points("shared-session"),
+        )
+
+
+expect_predicate(
+    "H32 같은 파일을 로드한 두 HistoryStore 의 같은 상태는 한 줄만 기록",
+    two_history_store_same_state_observation,
+    lambda result: all(warnings == [] for warnings in result[:5])
+    and len(result[5]) == 1
+    and len(result[6]) == 1,
+    "one persisted point after two stale in-memory stores record the same state",
+)
+
+
+def concurrent_same_history_state_observation():
+    worker_source = f'''\
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import time
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("orca_dashboard_same_state_worker", {str(DASHBOARD_PATH)!r})
+spec = importlib.util.spec_from_loader("orca_dashboard_same_state_worker", loader)
+dashboard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(dashboard)
+path, ready_path, go_path = sys.argv[1:]
+store = dashboard.HistoryStore(path)
+warnings = store.load()
+Path(ready_path).write_text("ready", encoding="utf-8")
+deadline = time.monotonic() + 10
+while not Path(go_path).exists() and time.monotonic() < deadline:
+    time.sleep(0.005)
+snapshot = {{"error": None, "sessions": [{{
+    "id": "shared-process-session",
+    "name": "shared process session",
+    "path": "/tmp/concurrent-same-history",
+    "agentType": "codex",
+    "status": "running",
+    "progress": {{"percent": 50, "basis": "same state"}},
+    "checklist": {{"pipeline": None, "steps": []}},
+}}]}}
+warnings.extend(store.record(snapshot, 60_000))
+print(json.dumps(warnings, ensure_ascii=False))
+raise SystemExit(0 if not warnings else 2)
+'''
+    with tempfile.TemporaryDirectory(prefix="orca dashboard concurrent same state ") as temporary_directory:
+        root = Path(temporary_directory)
+        path = root / "history.jsonl"
+        worker_path = root / "worker.py"
+        go_path = root / "go"
+        worker_path.write_text(worker_source, encoding="utf-8")
+        processes = []
+        ready_paths = []
+        for index in range(2):
+            ready_path = root / f"ready-{index}"
+            ready_paths.append(ready_path)
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(worker_path),
+                        str(path),
+                        str(ready_path),
+                        str(go_path),
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+        deadline = time.monotonic() + 10
+        while not all(ready_path.exists() for ready_path in ready_paths) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        all_ready = all(ready_path.exists() for ready_path in ready_paths)
+        go_path.write_text("go", encoding="utf-8")
+        outcomes = []
+        for process in processes:
+            try:
+                stdout, stderr = process.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                outcomes.append((-1, stdout, stderr))
+            else:
+                outcomes.append((process.returncode, stdout, stderr))
+        reloaded = dashboard.HistoryStore(str(path))
+        load_warnings = reloaded.load()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return (
+            all_ready,
+            outcomes,
+            load_warnings,
+            lines,
+            reloaded.points("shared-process-session"),
+        )
+
+
+expect_predicate(
+    "H32 두 프로세스의 같은 세션·같은 상태 동시 기록은 한 줄",
+    concurrent_same_history_state_observation,
+    lambda result: result[0]
+    and all(outcome[0] == 0 for outcome in result[1])
+    and result[2] == []
+    and len(result[3]) == 1
+    and len(result[4]) == 1,
+    "one persisted point after two concurrent writers record the same state",
 )
 
 
