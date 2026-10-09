@@ -6129,6 +6129,96 @@ for label, text, pipeline, offset, agent_state, completed, percent in (
     )
 
 
+print("H29 코드·따옴표 안 완료 신호와 Step 제외")
+expect_equal(
+    "completion_signal 은 인라인 코드 안 머지 신호를 무시",
+    lambda: dashboard.completion_signal(
+        "머지 보고(`머지했`·`merged=true`)가 있거나"
+    ),
+    False,
+)
+expect_equal(
+    "completion_signal 은 코드 펜스 안 merged=true 를 무시",
+    lambda: dashboard.completion_signal("확인 결과:\n```\nmerged=true\n```"),
+    False,
+)
+expect_equal(
+    "completion_signal 은 따옴표 안 머지했을 무시",
+    lambda: dashboard.completion_signal('완료 신호는 "머지했"입니다.'),
+    False,
+)
+expect_equal(
+    "completion_signal 은 서술 문장의 실제 머지 보고를 유지",
+    lambda: dashboard.completion_signal("PR #1 을 squash 머지했어요"),
+    True,
+)
+
+
+def h29_explanatory_merge_signal_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                260,
+                slash_request("private-implement", "머지 신호 설명 판정"),
+                uuid="h29-explanatory-merge-signal",
+            ),
+            assistant_text(
+                261,
+                "머지 보고(`머지했`·`merged=true`)가 있거나 완료 조건을 충족합니다.",
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+
+
+expect_predicate(
+    "활성 파이프라인의 머지 신호 설명 문장은 작업 완료가 아님",
+    h29_explanatory_merge_signal_items,
+    lambda items: len(items) == 1
+    and items[0]["id"] == "h29-explanatory-merge-signal"
+    and items[0]["result"] == "in_progress"
+    and items[0]["completedAt"] is None,
+    "one active in-progress pipeline item without completedAt",
+)
+
+
+def h29_inline_code_step_observation():
+    text = "/private-implement 현재 Step 3 진행 중입니다. 출력 예시는 `Step 7` 입니다."
+    items = dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                265,
+                slash_request("private-implement", "인라인 코드 Step 제외"),
+                uuid="h29-inline-code-step",
+            ),
+            assistant_text(266, text),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+    return progress_result(
+        agent_state="working", texts=[text], pipelines=HISTORY_PIPELINES
+    ), items[0]
+
+
+expect_predicate(
+    "인라인 코드 안 Step 7을 무시하고 카드·작업은 Step 3 유지",
+    h29_inline_code_step_observation,
+    lambda result: result[0]
+    == {
+        "percent": 20,
+        "basis": "/private-implement Step 3 (3/10단계 진행 중)",
+    }
+    and result[1]["stepPath"] == [3]
+    and result[1]["finalStep"] == 3
+    and result[1]["progress"] == result[0],
+    "Step 3 and 20 percent on card and work history",
+)
+
+
 print()
 if failures:
     print(f"실패 {len(failures)}건")
