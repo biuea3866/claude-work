@@ -64,6 +64,8 @@ COMPLETION_SIGNAL_RE = re.compile(r"머지했|merged=true")
 COMPLETION_BASIS = "완료 보고"
 # H26 — Step 추출 전에 제거하는 괄호 구간(예시·부연). 안쪽부터 반복 제거해 중첩도 처리한다
 PARENTHESIZED_RE = re.compile(r"\([^()（）]*\)|（[^()（）]*）")
+# H29 — 인용 영역(코드 펜스·인라인 코드·따옴표)은 신호·Step 판정에서 제외한다
+QUOTED_RE = re.compile(r"```.*?```|`[^`\n]*`|\"[^\"\n]*\"|“[^”\n]*”|「[^」\n]*」|(?<![A-Za-z0-9])'[^'\n]*'(?![A-Za-z0-9])", re.S)
 ERROR_LINE_RE = re.compile(
     r"BUILD FAILED|(?<![A-Za-z0-9_])FAILED(?![A-Za-z0-9_])|Traceback|Error:|exit code [1-9]"
 )
@@ -296,6 +298,11 @@ def _without_parentheses(text: str) -> str:
         text = stripped
 
 
+def _without_quoted(text: str | None) -> str:
+    """H29 — 코드 펜스·인라인 코드·따옴표 안 텍스트를 제거 (설명·인용 속 신호 오인 방지)."""
+    return QUOTED_RE.sub(" ", text or "")
+
+
 def _current_steps(text: str) -> list[int]:
     """괄호 안(H26)과 예고 문장(`다음`·`이후`·`next` 포함)을 뺀 문장들의 `Step N` 번호 (등장 순).
 
@@ -303,7 +310,7 @@ def _current_steps(text: str) -> list[int]:
     """
     return [
         int(match.group(1))
-        for sentence in SENTENCE_SPLIT_RE.split(_without_parentheses(text))
+        for sentence in SENTENCE_SPLIT_RE.split(_without_parentheses(_without_quoted(text)))
         if not STEP_FORECAST_RE.search(sentence)
         for match in STEP_MENTION_RE.finditer(sentence)
     ]
@@ -327,7 +334,7 @@ def _comment_progress(comment: str | None) -> dict | None:
 
 def completion_signal(text: str | None) -> bool:
     """H24 — 결정적 완료 신호(`머지했`·`merged=true`). 카드·체크리스트·작업 히스토리·추이 공통 판정."""
-    return COMPLETION_SIGNAL_RE.search(text or "") is not None
+    return COMPLETION_SIGNAL_RE.search(_without_quoted(text)) is not None
 
 
 def _completed_progress() -> dict:
