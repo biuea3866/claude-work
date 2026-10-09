@@ -360,11 +360,11 @@ expect_equal(
     {"percent": 100, "basis": "완료 보고"},
 )
 expect_equal(
-    "done 의 여러 줄 완료 보고는 전체 원문을 검사해 100%",
+    "done 의 일반 완료 문구는 결정적 신호가 아니므로 100% 아님",
     lambda: progress_result(
         agent_state="done", texts=["검증 결과입니다.\n모든 작업을 완료했습니다."]
     ),
-    {"percent": 100, "basis": "완료 보고"},
+    {"percent": None, "basis": "산정 불가"},
 )
 expect_equal(
     "working 의 머지 문구는 100% 아님",
@@ -487,7 +487,7 @@ expect_equal(
     None,
 )
 expect_predicate(
-    "done + 완료 보고면 체크리스트 전 단계 done",
+    "done + 일반 완료 문구는 Step 6 체크리스트를 완료 처리하지 않음",
     lambda: dashboard.pipeline_checklist(
         agent_state="done",
         texts=[
@@ -498,8 +498,9 @@ expect_predicate(
     ),
     lambda value: value is not None
     and len(value["steps"]) == 9
-    and all(step["state"] == "done" for step in value["steps"]),
-    "nine done steps",
+    and [step["state"] for step in value["steps"]]
+    == ["done"] * 6 + ["current"] + ["pending"] * 2,
+    "six done, one current, and two pending steps",
 )
 expect_predicate(
     "step_titles 미전달 시 모든 제목은 빈 문자열",
@@ -850,7 +851,7 @@ completion_terminal = terminal(
     "term-completion", "wt-completion", "tab-completion", "leaf"
 )
 expect_equal(
-    "build_snapshot 도 여러 줄 완료 원문으로 100% 판정",
+    "build_snapshot 은 일반 완료 문구만으로 100% 판정하지 않음",
     lambda: dashboard.build_snapshot(
         [completion_worktree],
         [completion_terminal],
@@ -858,15 +859,18 @@ expect_equal(
         now_ms=NOW_MS,
         pipelines=PIPELINES,
     )["sessions"][0]["progress"],
-    {"percent": 100, "basis": "완료 보고"},
+    {"percent": None, "basis": "산정 불가"},
 )
 expect_equal(
-    "build_snapshot 은 낡은 Step 4 recap 보다 최신 완료 보고를 채택",
+    "build_snapshot 은 최신 일반 완료 문구를 무시하고 Step 4 근거를 유지",
     lambda: snapshot_progress(
         "검증 결과입니다.\n모든 작업을 완료했습니다.",
         ["※ recap: Step 4 진행 중", "⏺ 모든 작업을 완료했습니다."],
     ),
-    {"percent": 100, "basis": "완료 보고"},
+    {
+        "percent": 44,
+        "basis": "/private-roadmap Step 4 (5/9단계 진행 중)",
+    },
 )
 expect_equal(
     "build_snapshot 은 낡은 Step 4 recap 보다 최신 Step 6을 채택",
@@ -3601,7 +3605,7 @@ def result_work_items():
     return dashboard.split_work_items(
         [
             history_record("user", 65, "완료될 첫 번째 작업 요청입니다", uuid="completed-work"),
-            assistant_text(66, "요청한 변경을 모두 완료했습니다"),
+            assistant_text(66, "요청한 변경을 PR 에 머지했습니다"),
             history_record("user", 67, "설명만 필요한 두 번째 질문입니다", uuid="answered-work"),
             assistant_text(68, "질문의 배경과 선택지를 설명합니다"),
             history_record("user", 69, "중단될 세 번째 작업 요청입니다", uuid="interrupted-work"),
@@ -3766,13 +3770,20 @@ def preserved_progress_items():
 
 
 expect_predicate(
-    "다음 작업 Step 변화 뒤에도 이전 작업의 stepPath·진행률을 보존",
+    "다음 작업이 마지막 Step 8에 도달해도 이전 작업을 보존하고 100% 완료",
     preserved_progress_items,
     lambda items: len(items) == 2
     and items[0]["stepPath"] == [7]
     and items[0]["progress"]["percent"] == 60
-    and items[1]["stepPath"] == [8],
-    "previous 60 percent remains after the next work reaches Step 8",
+    and items[1]["stepPath"] == [8]
+    and items[1]["result"] == "completed"
+    and items[1]["completedAt"] == utc_ms(history_timestamp(98))
+    and items[1]["progress"]
+    == {
+        "percent": 100,
+        "basis": "/private-roadmap Step 8 (마지막 단계 도달)",
+    },
+    "previous 60 percent plus a completed 100 percent Step 8 work item",
 )
 
 
@@ -4234,7 +4245,7 @@ def history_serve_environment(temporary_directory):
             uuid="serve-work-completed",
         ),
         assistant_text(107, "현재 Step 1 진행 중입니다."),
-        assistant_text(108, "첫 번째 작업을 모두 완료했습니다"),
+        assistant_text(108, "첫 번째 작업을 PR 에 머지했습니다"),
         history_record("user", 110, "히스토리 누적 통합 요청", uuid="serve-work-running"),
         tool_use(
             111,
@@ -5110,7 +5121,7 @@ def completed_then_gratitude_items():
                 "첫 번째 요청을 완성해 주세요",
                 uuid="completed-before-gratitude",
             ),
-            assistant_text(141, "요청한 작업을 모두 완료했습니다"),
+            assistant_text(141, "요청한 작업을 PR 에 머지했습니다"),
             history_record("user", 142, "고마워", uuid="gratitude-is-new-work"),
             assistant_text(143, "네"),
         ],
@@ -5140,7 +5151,7 @@ def completed_then_approval_items():
                 "승인 전 작업을 완성해 주세요",
                 uuid="completed-before-approval",
             ),
-            assistant_text(146, "요청한 작업을 완료했습니다"),
+            assistant_text(146, "요청한 작업을 PR 에 머지했습니다"),
             history_record("user", 147, "승인", uuid="approval-followup"),
             assistant_text(148, "네"),
         ],
@@ -5170,7 +5181,7 @@ expect_predicate(
                 slash_request("private-implement", "첫 파이프라인 작업"),
                 uuid="completed-pipeline",
             ),
-            assistant_text(151, "파이프라인 작업을 완료했습니다"),
+            assistant_text(151, "파이프라인 작업을 PR 에 머지했습니다"),
             history_record(
                 "user",
                 152,
@@ -5724,9 +5735,9 @@ expect_predicate(
 )
 
 
-print("H20 단계 완료와 작업 완료 구분")
+print("H24 결정적 완료 신호")
 expect_predicate(
-    "Step 완료 뒤 다음 Step 이 있으면 전체 완료가 아니고 다음 질문도 활성 작업에 귀속",
+    "결정적 신호 없는 Step 완료와 다음 Step 예고는 전체 완료가 아님",
     lambda: dashboard.split_work_items(
         [
             history_record(
@@ -5777,7 +5788,7 @@ def completed_time_observation():
     items = dashboard.split_work_items(
         [
             history_record("user", 0, "완료 시각을 고정할 작업", uuid="h21-completed"),
-            assistant_text(0, "요청한 작업을 완료했습니다."),
+            assistant_text(0, "요청한 작업을 PR 에 머지했습니다."),
             history_record("user", 600, "승인", uuid="h21-approval"),
             assistant_text(660, "네"),
         ],
@@ -5853,6 +5864,269 @@ expect_predicate(
     and items[0]["runId"] is None,
     "one plain work item after all heredoc bodies are removed",
 )
+
+
+print("H24~H28 에스컬레이션 후 완료·Step·mkdir 공통 계약")
+expect_equal(
+    "completion_signal 은 머지했·merged=true 만 완료 신호로 판정",
+    lambda: [
+        dashboard.completion_signal(text)
+        for text in (
+            "요청한 작업을 완료했습니다. 변경 사항은 다음과 같습니다.",
+            "테스트를 완료했습니다. 구현을 진행합니다.",
+            "PR 을 머지했습니다.",
+            "merge result: merged=true",
+        )
+    ],
+    [False, False, True, True],
+)
+
+
+def h24_general_completion_items():
+    return dashboard.split_work_items(
+        [
+            history_record("user", 220, "일반 완료 문구 판정", uuid="h24-general"),
+            assistant_text(
+                221,
+                "요청한 작업을 완료했습니다. 변경 사항은 다음과 같습니다.",
+            ),
+            history_record("user", 222, "별도 질문을 설명해 주세요", uuid="h24-next"),
+            assistant_text(223, "별도 질문에 답변합니다."),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "일반 완료 문구로 끝난 파이프라인 밖 작업은 answered",
+    h24_general_completion_items,
+    lambda items: len(items) == 2
+    and items[0]["result"] == "answered"
+    and items[0]["completedAt"] is None
+    and items[0]["progress"] == {"percent": None, "basis": "산정 불가"},
+    "an answered first work item without completedAt",
+)
+
+
+def h24_partial_completion_items():
+    return dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                225,
+                slash_request("private-implement", "부분 완료 판정"),
+                uuid="h24-partial",
+            ),
+            assistant_text(226, "테스트를 완료했습니다. 구현을 진행합니다."),
+            history_record(
+                "user", 227, "구현 방향을 추가로 설명해 주세요", uuid="h24-partial-followup"
+            ),
+        ],
+        pipelines=HISTORY_PIPELINES,
+    )
+
+
+expect_predicate(
+    "테스트 완료 후 구현 진행 보고는 완료가 아니며 활성 파이프라인 유지",
+    h24_partial_completion_items,
+    lambda items: len(items) == 1
+    and items[0]["id"] == "h24-partial"
+    and items[0]["requestCount"] == 2
+    and items[0]["result"] == "in_progress"
+    and items[0]["completedAt"] is None,
+    "one active in-progress pipeline item",
+)
+
+expect_predicate(
+    "PR 머지 보고는 작업 completed 와 done 카드 100%",
+    lambda: (
+        dashboard.split_work_items(
+            [
+                history_record("user", 230, "PR 머지 판정", uuid="h24-merge"),
+                assistant_text(231, "PR 을 머지했습니다."),
+            ],
+            pipelines=HISTORY_PIPELINES,
+        ),
+        progress_result(agent_state="done", texts=["PR 을 머지했습니다."]),
+    ),
+    lambda result: result[0][0]["result"] == "completed"
+    and result[0][0]["completedAt"] == utc_ms(history_timestamp(231))
+    and result[1] == {"percent": 100, "basis": "완료 보고"},
+    "completed work and 100 percent card",
+)
+
+
+def h25_last_step_observation():
+    text = "/private-roadmap 현재 Step 8 진행 중입니다."
+    items = dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                235,
+                slash_request("private-roadmap", "마지막 단계 도달"),
+                uuid="h25-last-step",
+            ),
+            assistant_text(236, text),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+    return {
+        "card": progress_result(agent_state="working", texts=[text]),
+        "checklist": dashboard.pipeline_checklist(
+            agent_state="working",
+            texts=[text],
+            pipelines=HISTORY_PIPELINES,
+            step_titles=HISTORY_STEP_TITLES,
+        ),
+        "item": items[0],
+        "series": dashboard.progress_series(items, [], HISTORY_PIPELINES),
+    }
+
+
+expect_predicate(
+    "roadmap 마지막 Step 8 언급은 카드·체크리스트·작업·추이 100% 완료",
+    h25_last_step_observation,
+    lambda result: result["card"]
+    == {"percent": 100, "basis": "/private-roadmap Step 8 (마지막 단계 도달)"}
+    and all(step["state"] == "done" for step in result["checklist"]["steps"])
+    and result["item"]["result"] == "completed"
+    and result["item"]["completedAt"] == utc_ms(history_timestamp(236))
+    and result["item"]["progress"] == result["card"]
+    and result["series"]
+    and result["series"][-1]["at"] == utc_ms(history_timestamp(236))
+    and result["series"][-1]["percent"] == 100,
+    "100 percent completion at the Step 8 mention time on every surface",
+)
+
+
+def h26_parenthesized_step_observation():
+    text = "/private-implement 현재 Step 3 진행 중입니다. (index 기준, Step 7 → 60%)"
+    items = dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                240,
+                slash_request("private-implement", "괄호 Step 제외"),
+                uuid="h26-parenthesized-step",
+            ),
+            assistant_text(241, text),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+    return progress_result(
+        agent_state="working", texts=[text], pipelines=HISTORY_PIPELINES
+    ), items[0]
+
+
+expect_predicate(
+    "괄호 안 Step 7 예시를 무시하고 카드·작업은 Step 3 20%",
+    h26_parenthesized_step_observation,
+    lambda result: result[0]
+    == {
+        "percent": 20,
+        "basis": "/private-implement Step 3 (3/10단계 진행 중)",
+    }
+    and result[1]["stepPath"] == [3]
+    and result[1]["finalStep"] == 3
+    and result[1]["progress"] == result[0],
+    "Step 3 and 20 percent on card and work history",
+)
+
+expect_predicate(
+    "mkdir 대상에 붙은 stdout 리다이렉션의 run 경로는 시작 신호가 아님",
+    lambda: work_with_mkdir_candidate(
+        "mkdir -p output>runs/private-roadmap/20261007-old/e.log"
+    ),
+    lambda items: len(items) == 1
+    and items[0]["pipeline"] is None
+    and items[0]["runId"] is None,
+    "one plain work item after attached redirection is removed",
+)
+expect_equal(
+    "mkdir 인자의 따옴표 안 > 는 경로 문자로 유지",
+    lambda: dashboard.mkdir_targets('mkdir -p "a>b"'),
+    ["a>b"],
+)
+
+
+def h28_consistency_observation(text, pipeline, offset, agent_state):
+    items = dashboard.split_work_items(
+        [
+            history_record(
+                "user",
+                offset,
+                slash_request(pipeline, "판정 일관성"),
+                uuid=f"h28-{offset}",
+            ),
+            assistant_text(offset + 1, text),
+        ],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+    checklist = dashboard.pipeline_checklist(
+        agent_state=agent_state,
+        texts=[text],
+        pipelines=HISTORY_PIPELINES,
+        step_titles=HISTORY_STEP_TITLES,
+    )
+    series = dashboard.progress_series(items, [], HISTORY_PIPELINES)
+    return {
+        "card": progress_result(
+            agent_state=agent_state, texts=[text], pipelines=HISTORY_PIPELINES
+        ),
+        "allDone": checklist is not None
+        and all(step["state"] == "done" for step in checklist["steps"]),
+        "item": items[0],
+        "series": series,
+    }
+
+
+for label, text, pipeline, offset, agent_state, completed, percent in (
+    (
+        "done + 머지 보고",
+        "/private-implement 현재 Step 4 작업을 PR 에 머지했습니다.",
+        "private-implement",
+        245,
+        "done",
+        True,
+        100,
+    ),
+    (
+        "Step 1 완료 + 다음 Step 예고",
+        "/private-implement Step 1을 완료했습니다. 다음은 Step 2입니다.",
+        "private-implement",
+        250,
+        "done",
+        False,
+        0,
+    ),
+    (
+        "마지막 Step 언급",
+        "/private-roadmap 현재 Step 8 진행 중입니다.",
+        "private-roadmap",
+        255,
+        "working",
+        True,
+        100,
+    ),
+):
+    expect_predicate(
+        f"H28 {label}의 카드·체크리스트·작업·progressSeries 판정 일치",
+        lambda text=text, pipeline=pipeline, offset=offset, agent_state=agent_state: h28_consistency_observation(
+            text, pipeline, offset, agent_state
+        ),
+        lambda result, completed=completed, percent=percent: result["card"]["percent"]
+        == percent
+        and result["allDone"] == completed
+        and result["item"]["result"]
+        == ("completed" if completed else "in_progress")
+        and result["item"]["progress"]["percent"] == percent
+        and result["series"]
+        and result["series"][-1]["percent"] == percent,
+        f"all current surfaces at {percent} percent and completed={completed}",
+    )
 
 
 print()
