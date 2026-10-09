@@ -59,7 +59,11 @@ STEP_FORECAST_RE = re.compile(r"다음|이후|next", re.I)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n")
 PIPELINE_NAME_RE = re.compile(r"private-[a-z][a-z-]*")
 COMMENT_PROGRESS_RE = re.compile(r"진행\s*(\d{1,3})\s*%")
-COMPLETION_RE = re.compile(r"머지했|merged=true|완료했습니다|모두 끝났습니다")
+# H24 — 결정적 완료 신호(머지 보고)만. `완료했습니다`·`모두 끝났습니다` 같은 일반 문구는 완료가 아니다
+COMPLETION_SIGNAL_RE = re.compile(r"머지했|merged=true")
+COMPLETION_BASIS = "완료 보고"
+# H26 — Step 추출 전에 제거하는 괄호 구간(예시·부연). 안쪽부터 반복 제거해 중첩도 처리한다
+PARENTHESIZED_RE = re.compile(r"\([^()（）]*\)|（[^()（）]*）")
 ERROR_LINE_RE = re.compile(
     r"BUILD FAILED|(?<![A-Za-z0-9_])FAILED(?![A-Za-z0-9_])|Traceback|Error:|exit code [1-9]"
 )
@@ -108,11 +112,10 @@ SHORT_FOLLOWUP_RE = re.compile(
     re.I,
 )
 SHORT_FOLLOWUP_TRAILING_CHARS = " .!?~"
-WORK_CONTINUATION_RE = re.compile(r"다음|이후|next|이어서", re.I)
-STEP_SCOPE_RE = re.compile(r"Step\s*\d|단계", re.I)
-SHELL_REDIRECTION_RE = re.compile(r"^(?:\d+|&)?(?:>>|>&|>\||<<<|<<-|<<|<>|<&|>|<)(.*)$", re.S)
-SHELL_UNPARSEABLE_MARKERS = ("$(", "`", "<(", ">(")
+SHELL_UNPARSEABLE_MARKERS = ("$(", "`")
 SHELL_SEPARATOR_CHARS = ";&|\n"
+SHELL_REDIRECTION_CHARS = "<>"
+SHELL_OPERATOR_CHARS = SHELL_SEPARATOR_CHARS + SHELL_REDIRECTION_CHARS
 SHELL_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 SHELL_VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 WORK_RESULTS = ("completed", "in_progress", "answered", "interrupted")
@@ -284,11 +287,23 @@ def _round_half_up_percent(index: int, total: int) -> int:
     return (2 * index * 100 + total) // (2 * total)
 
 
+def _without_parentheses(text: str) -> str:
+    """H26 — 괄호 `(…)`·`（…）` 안의 텍스트(예시·부연)를 제거. 중첩은 안쪽부터 반복 제거한다."""
+    while True:
+        stripped = PARENTHESIZED_RE.sub(" ", text)
+        if stripped == text:
+            return text
+        text = stripped
+
+
 def _current_steps(text: str) -> list[int]:
-    """예고 문장(`다음`·`이후`·`next` 포함)을 뺀 문장들의 `Step N` 번호 (등장 순)."""
+    """괄호 안(H26)과 예고 문장(`다음`·`이후`·`next` 포함)을 뺀 문장들의 `Step N` 번호 (등장 순).
+
+    세션 카드·체크리스트·작업 히스토리가 모두 이 함수로 현재 Step 을 판정한다.
+    """
     return [
         int(match.group(1))
-        for sentence in SENTENCE_SPLIT_RE.split(text)
+        for sentence in SENTENCE_SPLIT_RE.split(_without_parentheses(text))
         if not STEP_FORECAST_RE.search(sentence)
         for match in STEP_MENTION_RE.finditer(sentence)
     ]
@@ -310,13 +325,22 @@ def _comment_progress(comment: str | None) -> dict | None:
     return {"percent": percent, "basis": f"worktree 코멘트: 진행 {percent}%"}
 
 
+def completion_signal(text: str | None) -> bool:
+    """H24 — 결정적 완료 신호(`머지했`·`merged=true`). 카드·체크리스트·작업 히스토리·추이 공통 판정."""
+    return COMPLETION_SIGNAL_RE.search(text or "") is not None
+
+
+def _completed_progress() -> dict:
+    return {"percent": 100, "basis": COMPLETION_BASIS}
+
+
 def _completion_progress(agent_state: str | None, texts: list[str]) -> dict | None:
     if agent_state != "done":
         return None
     latest = next((text for text in _texts_newest_first(texts) if text.strip()), None)
-    if latest is None or not COMPLETION_RE.search(latest):
+    if latest is None or not completion_signal(latest):
         return None
-    return {"percent": 100, "basis": "완료 보고"}
+    return _completed_progress()
 
 
 def _pipeline_position(texts: list[str], pipelines: dict[str, list[int]]) -> tuple[str, int] | None:
@@ -328,8 +352,18 @@ def _pipeline_position(texts: list[str], pipelines: dict[str, list[int]]) -> tup
     return pipeline, pipelines[pipeline].index(step)
 
 
+def _is_last_step(steps: list[int], index: int) -> bool:
+    """H25 — 파이프라인 마지막 Step 도달 = 완료. 카드·체크리스트·작업 히스토리 공통 판정."""
+    return index == len(steps) - 1
+
+
 def _step_progress(pipeline: str, steps: list[int], index: int, *, interrupted: bool = False) -> dict:
-    """파이프라인 단계 인덱스 → 진행률. 세션 카드·작업 히스토리·추이가 같은 산식을 쓴다."""
+    """파이프라인 단계 인덱스 → 진행률. 세션 카드·작업 히스토리·추이가 같은 산식을 쓴다.
+
+    마지막 Step 이면 100% (`마지막 단계 도달`, H25). 그 외에는 index 기준 반올림 산식.
+    """
+    if _is_last_step(steps, index):
+        return {"percent": 100, "basis": f"/{pipeline} Step {steps[index]} (마지막 단계 도달)"}
     ending = "에서 중단" if interrupted else " 진행 중"
     return {
         "percent": _round_half_up_percent(index, len(steps)),
@@ -379,7 +413,7 @@ def pipeline_checklist(
     if position is None:
         return None
     pipeline, current_index = position
-    finished = _completion_progress(agent_state, texts) is not None
+    finished = _completion_progress(agent_state, texts) is not None or _is_last_step(pipelines[pipeline], current_index)
     titles = (step_titles or {}).get(pipeline) or {}
     return {
         "pipeline": pipeline,
@@ -833,9 +867,11 @@ def strip_heredocs(command: str) -> str:
 def _shell_commands(command: str) -> list[list[str]]:
     """명령 문자열 → 단순 명령(토큰 목록) 목록. `&&`·`||`·`;`·`|`·줄바꿈으로 나누고 `#` 주석은 버린다.
 
+    H27 — 따옴표 밖의 `<`·`>` 는 공백 없이 붙어 있어도 별도 연산자 토큰으로 분리된다
+    (`output>runs/x` → `output`, `>`, `runs/x`). 따옴표 안의 `<`·`>` 는 단어의 일부로 남는다.
     shlex 가 따옴표를 풀지 못하면(짝 없는 따옴표 등) ValueError 를 올린다.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_SEPARATOR_CHARS)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_OPERATOR_CHARS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -860,23 +896,34 @@ def _expand_variables(word: str, variables: dict[str, str]) -> str:
     return SHELL_VARIABLE_RE.sub(lambda match: variables.get(match.group(1) or match.group(2), match.group(0)), word)
 
 
-def _without_redirections(tokens: list[str]) -> list[str]:
-    """H22 — 리다이렉션 연산자(`>`·`>>`·`<`·`2>`·`&>`·`>&`·`<<` 등, 숫자 접두 포함)와 그 피연산자를 뺀 토큰.
+def _is_redirection_operator(token: str) -> bool:
+    """`_shell_commands` 가 분리한 연산자 토큰 중 `<`·`>` 를 포함한 것 (`>`·`>>`·`>&`·`&>`·`<<<` 등)."""
+    return any(char in SHELL_REDIRECTION_CHARS for char in token) and all(char in SHELL_OPERATOR_CHARS for char in token)
 
-    붙어 쓴 형태(`2>file`·`>file`)는 그 토큰만, 분리된 형태(`2> file`)는 다음 토큰까지 제거한다.
+
+def _without_redirections(tokens: list[str]) -> list[str] | None:
+    """H22·H27 — 리다이렉션 연산자와 그 피연산자, fd 숫자 접두(`2>`의 `2`)를 뺀 토큰.
+
+    연산자는 `_shell_commands` 가 붙은 형태(`2>file`·`output>file`)까지 분리해 둔 상태다. 연산자 바로 앞의
+    숫자만으로 된 토큰은 fd 접두로 본다(공백 정보가 없어 `mkdir 2 >x` 의 `2` 도 빠지지만, 숫자 디렉토리는
+    run 경로가 될 수 없어 신호 판정에 영향이 없다). 프로세스 치환(`<(`·`>(`)·피연산자 없는 연산자는
+    해석 불가 → None.
     """
     kept: list[str] = []
     skip_operand = False
     for token in tokens:
         if skip_operand:
+            if token.startswith("("):
+                return None
             skip_operand = False
             continue
-        redirection = SHELL_REDIRECTION_RE.match(token)
-        if redirection is None:
+        if not _is_redirection_operator(token):
             kept.append(token)
-        elif not redirection.group(1):
-            skip_operand = True
-    return kept
+            continue
+        if kept and kept[-1].isdigit():
+            kept.pop()
+        skip_operand = True
+    return None if skip_operand else kept
 
 
 def mkdir_targets(command: str) -> list[str]:
@@ -892,6 +939,8 @@ def mkdir_targets(command: str) -> list[str]:
     targets: list[str] = []
     for raw_tokens in commands:
         tokens = _without_redirections(raw_tokens)
+        if tokens is None:
+            continue
         index = 0
         while index < len(tokens) and (assignment := SHELL_ASSIGNMENT_RE.match(tokens[index])):
             variables[assignment.group(1)] = _expand_variables(assignment.group(2), variables)
@@ -1082,18 +1131,6 @@ def is_short_followup(text: str) -> bool:
     return SHORT_FOLLOWUP_RE.fullmatch(normalized) is not None
 
 
-def is_work_completion(text: str) -> bool:
-    """H20 — 작업 전체 완료 보고. 문장 분리는 R9(`_current_steps`)와 같은 SENTENCE_SPLIT_RE.
-
-    COMPLETION_RE 가 맞는 문장 중 Step·단계 언급이 없는 문장이 있고, 같은 텍스트에 다음 진행을 예고하는
-    문장(`다음`·`이후`·`next`·`이어서`)이 없을 때만 완료다. `Step 1을 완료했습니다. 다음은 Step 2입니다.` = 완료 아님.
-    """
-    sentences = [sentence for sentence in SENTENCE_SPLIT_RE.split(text) if sentence.strip()]
-    if any(WORK_CONTINUATION_RE.search(sentence) for sentence in sentences):
-        return False
-    return any(COMPLETION_RE.search(sentence) and not STEP_SCOPE_RE.search(sentence) for sentence in sentences)
-
-
 def _title_line(text: str | None) -> str:
     return (_first_meaningful_line(text) or _first_line(text, TRANSCRIPT_TITLE_CHARS) or "")[:TRANSCRIPT_TITLE_CHARS]
 
@@ -1112,8 +1149,8 @@ def _work_title(request: str) -> str:
 
 
 def _reported_completion(work: dict) -> bool:
-    """H11 — 완료 보고는 고정: 한 번 기록된 completedAt 은 이후 응답으로 취소되지 않는다."""
-    return work["completed"]
+    """H11 — 완료는 고정: 한 번 기록된 completedAt 은 이후 응답으로 취소되지 않는다."""
+    return work["completionProgress"] is not None
 
 
 def _work_result(work: dict, final_step: int | None, pipelines: dict[str, list[int]], is_last: bool) -> str:
@@ -1130,8 +1167,7 @@ def _work_result(work: dict, final_step: int | None, pipelines: dict[str, list[i
 
 
 def _work_progress(result: str, pipeline: str | None, step: int | None, pipelines: dict[str, list[int]]) -> dict:
-    if result == "completed":
-        return {"percent": 100, "basis": "완료 보고"}
+    """Step 기준 진행률 (완료된 작업은 완료 시점에 고정한 completionProgress 를 쓴다)."""
     steps = (pipelines.get(pipeline) or []) if pipeline else []
     if step not in steps:
         return {"percent": None, "basis": "산정 불가"}
@@ -1167,8 +1203,8 @@ class _WorkSplitter:
             "pipeline": pipeline,
             "runId": run_id,
             "steps": [],
-            "completed": False,
             "completedAt": None,
+            "completionProgress": None,
             "interrupted": False,
             "subagents": 0,
             "backgroundShells": 0,
@@ -1256,20 +1292,29 @@ class _WorkSplitter:
         self._task_origin[task["id"]] = len(self._works) - 1
         self._current["subagents" if task["kind"] == "agent" else "backgroundShells"] += 1
 
+    @staticmethod
+    def _complete(work: dict, at: int | None, progress: dict) -> None:
+        """H11·H21 — 첫 완료 시각과 그때의 진행률을 고정한다 (이후 응답으로 바뀌지 않음)."""
+        work["interrupted"] = False
+        if not _reported_completion(work):
+            work["completedAt"], work["completionProgress"] = at, progress
+
     def _text(self, at: int | None, text: str) -> None:
         work = self._current
         if work is None or not text.strip():
             return
-        if is_work_completion(text):
-            work["interrupted"] = False
-            if not work["completed"]:
-                work["completed"], work["completedAt"] = True, at
+        if completion_signal(text):  # H24 — 카드와 같은 결정적 완료 신호
+            self._complete(work, at, _completed_progress())
         if work["pipeline"] is None:
             return
         current = _current_steps(text)
         if current and (not work["steps"] or work["steps"][-1]["step"] != current[-1]):
             title = (self._step_titles.get(work["pipeline"]) or {}).get(current[-1], "")
             work["steps"].append({"at": at, "step": current[-1], "title": title})
+        steps = self._pipelines.get(work["pipeline"]) or []
+        if current and current[-1] in steps and _is_last_step(steps, steps.index(current[-1])):
+            # H25 — 마지막 Step 도달 = 완료 (카드와 같은 _step_progress 값으로 고정)
+            self._complete(work, at, _step_progress(work["pipeline"], steps, steps.index(current[-1])))
 
     def items(self) -> list[dict]:
         failed = [0] * len(self._works)
@@ -1292,7 +1337,8 @@ class _WorkSplitter:
                 "stepPath": [step["step"] for step in work["steps"]],
                 "finalStep": final_step,
                 "steps": work["steps"],
-                "progress": _work_progress(result, work["pipeline"], final_step, self._pipelines),
+                "progress": work["completionProgress"]
+                or _work_progress(result, work["pipeline"], final_step, self._pipelines),
                 "result": result,
                 "subagents": work["subagents"],
                 "backgroundShells": work["backgroundShells"],
@@ -1344,11 +1390,12 @@ def progress_series(work_items: list[dict], observed: list[dict], pipelines: dic
             if step["at"] is not None:
                 progress = _work_progress("in_progress", item["pipeline"], step["step"], pipelines)
                 points.append(_series_point(step["at"], progress, "transcript", item["id"]))
-        # H21 — 완료 100% 점은 완료 보고 시각(completedAt) 고정. 후속 응답(endedAt)으로 옮기지 않는다
+        # H21 — 완료 점은 완료 시각(completedAt) 고정, 값은 작업 progress(카드와 같은 판정). 후속 응답으로 옮기지 않는다.
+        # 마지막 Step 도달(H25)처럼 같은 시각·값의 Step 점이 이미 있으면 중복 점을 만들지 않는다.
         if item["result"] == "completed" and item.get("completedAt") is not None:
-            points.append(
-                _series_point(item["completedAt"], {"percent": 100, "basis": "완료 보고"}, "transcript", item["id"])
-            )
+            completion = _series_point(item["completedAt"], item["progress"], "transcript", item["id"])
+            if completion not in points:
+                points.append(completion)
     for point in observed:
         if point.get("percent") is not None:
             points.append(_series_point(point["at"], point, "dashboard", None))
