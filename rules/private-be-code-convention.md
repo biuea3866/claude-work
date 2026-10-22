@@ -29,6 +29,7 @@ paths:
 | no-default-constructor-values | Entity 생성자 `= ""` / `= 0` / `= ZonedDateTime.now()` | 호출부에서 명시적으로 전달 |
 | no-double-bang | `!!` | `requireNotNull()` / `?:` / `?.let` |
 | no-optional-return | `Optional<T>` 반환·보유 (`java.util.Optional`) | Kotlin nullable 타입 (`T?`) + `?:` / `?.let` |
+| no-value-field-injection | `@Value` + `lateinit var` 필드 주입 | 생성자 주입. 설정값은 `@ConfigurationProperties` data class로 묶어 주입 |
 | no-repository-in-consumer | Consumer 내 `Repository.save/find` | UseCase 경유 |
 | no-transactional-in-repository | `@Transactional` in `*Repository*.kt` | UseCase에서만 선언 |
 | no-infra-in-domain | `import *.infrastructure.*` in `domain/**` | Domain interface 사용 |
@@ -81,6 +82,7 @@ presentation → application → domain ← infrastructure
 
 - **domain 순수성 완화의 범위**: 이 결정으로 domain은 `org.springframework.stereotype.Service`(및 `@Component`) **한 종류만** import를 허용한다. JPA(`@Entity`·`@Table`)·Spring Data·Web·Kafka·`org.springframework.context.annotation.*`(`@Configuration`/`@Bean`)·infrastructure 타입 import는 domain에서 **여전히 금지**다. 생성자 주입은 그대로 유지한다 (`@Autowired` 필드 주입 금지).
 - **`@Configuration`이 여전히 필요한 경우**: 프레임워크/서드파티 빈(우리가 애노테이트할 수 없는 클래스 — `ObjectMapper`·`RestClient`·`KafkaTemplate` 커스터마이징·`WebClient` 등), 조건부/프로퍼티 바인딩 설정은 `@Configuration`을 쓴다. 금지 대상은 **우리 소유 서비스(DomainService·UseCase)를 `@Bean`으로 수동 배선하는 Config**다.
+- **설정값은 `@ConfigurationProperties` data class로 묶는다** — 같은 prefix의 값을 `@Value`로 흩뿌리지 않는다 (no-value-field-injection). 기간은 `Duration`, 필수 값은 non-null 선언 + `@Validated`로 기동 시점에 실패시킨다. 기본값이 있는 선택 설정만 data class 기본값을 쓴다. 한 PR 안에서 같은 prefix를 `@ConfigurationProperties`와 `@Value`로 섞지 않는다.
 - **DI 애노테이션으로 기능 토글 금지**: `@ConditionalOnProperty`/`@Profile`은 여전히 금지(no-conditional-on-property) — 컴포넌트 스캔은 무조건 등록이고, on/off는 런타임 플래그로 분기한다.
 
 ### infrastructure는 얇은 어댑터 — 비즈니스 흐름 금지
@@ -287,6 +289,10 @@ class Rental private constructor(
 - 외부 API 호출도 Repository와 동일하게 **domain interface + infrastructure 구현** 구조를 따른다: domain에 `~Gateway.kt` interface 정의 → infrastructure에 `~GatewayImpl.kt` 구현.
 - HTTP 클라이언트(`XXXClient` — RestClient·WebClient·Feign 등)는 **GatewayImpl에만 DI**한다. domain·application 레이어에 Client 타입이 노출되면 안 된다.
 - Client의 요청/응답 DTO는 infrastructure에 두고, GatewayImpl이 도메인 타입으로 변환해 반환한다.
+- **메서드가 하나뿐인 포트(Gateway)는 `fun interface`로 선언**한다 — 테스트에서 람다로 대체할 수 있다.
+- **인증 헤더는 프레임워크 API로 만든다** — `headers { it.setBasicAuth(id, secret) }` 또는 클라이언트 빈의 `defaultHeaders`. `Base64` 직접 인코딩을 호출마다 복사하지 않는다.
+- **응답 검증 실패는 의미 있는 전용 예외로 올린다** — `check()`/`checkNotNull()`의 `IllegalStateException` 하나로 뭉치지 않는다. 호출부가 원인(응답 없음·필수 필드 누락·불완전 목록)을 구분할 수 있어야 한다.
+- **페이지네이션 조회는 전 페이지 성공 시에만 결과를 반영**한다 — 한 페이지라도 실패하면 예외로 올려 기존 값을 유지한다. 종료 조건(`totalCount` 도달)과 상한(최대 페이지 수) 가드를 함께 둔다.
 
 ```kotlin
 // domain/payment/PaymentGateway.kt
@@ -303,6 +309,14 @@ class PaymentGatewayImpl(
         tossPaymentClient.requestPayment(payment.toClientRequest()).toDomain()
 }
 ```
+
+## 백그라운드 작업·캐시
+
+- **주기 작업은 Spring이 관리한다** — `@Scheduled(fixedDelayString = ...)`(또는 주입받은 `TaskScheduler`)를 쓴다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다.
+- **기동 직후 한 번 채워야 하는 값**은 `@PostConstruct`에서 동기 로드한다 — 실패 시 정책(기동 중단 vs 기본값으로 시작)을 코드와 문서에 명시한다.
+- **메모리 캐시는 불변 스냅샷 + `AtomicReference` 교체**로 구현한다 — 조회 경로는 스냅샷만 읽어 호출 스레드를 막지 않는다. 갱신은 완성된 새 스냅샷을 `set`하는 것으로만 한다(부분 갱신 금지).
+- **갱신 실패 시 정책을 명시**한다 — 마지막 성공 값을 유지하는 최대 시간(`maxStale`)과 초과 후 동작(기본값 폴백)을 설정으로 두고, 폴백 전환은 `warn` 로그에 더해 알림 가능한 지표로 남긴다.
+- 갱신 로직은 infrastructure 어댑터에 둔다 — domain 서비스는 스레드·스케줄러·외부 호출을 가지지 않는다 (domain 순수성, 위 "레이어 책임").
 
 ## 코틀린 함수형 프로그래밍 (적극 활용)
 
@@ -437,6 +451,8 @@ class PricingDomainService(
 - 한 메서드는 하나의 추상화 수준만 (`entity.markPaid()`와 `repository.save()` 공존 금지)
 - Guard clause(early return) 적극 사용, if-else 중첩 depth 2 이상 금지
 - 매직 넘버/문자열 금지 (상수/enum), 주석 대신 메서드명으로 의도 표현
+- **`catch (e: Exception)`으로 `InterruptedException`을 삼키지 않는다** — `Thread.currentThread().interrupt()`로 인터럽트 상태를 복원하거나 별도 분기로 재던진다. 스케줄러·워커 스레드의 종료 신호를 로그로만 흘려보내지 않는다.
+- **`@Suppress`는 대상 요소에 좁게** — `catch (@Suppress("TooGenericExceptionCaught") e: Exception)`처럼 파라미터·식 단위로 붙인다. 클래스·함수 전체에 붙이지 않는다.
 
 ```kotlin
 // ✅ Guard clause
