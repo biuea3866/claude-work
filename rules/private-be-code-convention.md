@@ -312,7 +312,7 @@ class PaymentGatewayImpl(
 
 ## 백그라운드 작업·캐시
 
-- **주기 작업은 Spring이 관리한다** — infrastructure 어댑터의 `@Scheduled(fixedDelayString = "${설정키}")`(설정 값은 `PT5M` 같은 ISO-8601 `Duration` 표기)(또는 주입받은 `TaskScheduler`)로 트리거만 걸고, 판단 로직은 두지 않는다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다. 주기 값은 `@ConfigurationProperties`의 같은 키를 쓴다.
+- **주기 작업은 Spring이 관리한다** — infrastructure 어댑터의 `@Scheduled(fixedDelayString = "${설정키}")`(또는 주입받은 `TaskScheduler`)로 트리거만 걸고, 판단 로직은 두지 않는다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다. 주기 값은 `@ConfigurationProperties`의 같은 키를 쓰고, 설정 값은 `PT5M` 같은 ISO-8601 `Duration` 표기로 둔다.
 - **기동 직후 한 번 채워야 하는 값**은 infrastructure 어댑터의 `@PostConstruct`에서 동기 로드한다 — 실패 시 정책(기동 중단 vs 기본값으로 시작)을 코드와 문서에 명시한다. domain 서비스는 외부 호출을 하지 않는다.
 - **메모리 캐시는 불변 스냅샷 + `AtomicReference` 교체**로 구현한다 — 조회 경로는 스냅샷만 읽어 호출 스레드를 막지 않는다. 갱신은 완성된 새 스냅샷을 `set`하는 것으로만 한다(부분 갱신 금지). 시각 판정은 스냅샷이 캡슐화한다 (`isStale(maxStale)` 내부에서 `ZonedDateTime.now()` — `Clock` 주입·시간 인자 금지).
 - **갱신 실패 시 정책을 명시**한다 — 마지막 성공 값을 유지하는 최대 시간(`maxStale`)과 초과 후 동작(기본값 폴백)을 설정으로 두고, 폴백 전환은 `warn` 로그에 더해 알림 가능한 지표로 남긴다.
