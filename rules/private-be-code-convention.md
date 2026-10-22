@@ -82,7 +82,7 @@ presentation → application → domain ← infrastructure
 
 - **domain 순수성 완화의 범위**: 이 결정으로 domain은 `org.springframework.stereotype.Service`(및 `@Component`) **한 종류만** import를 허용한다. JPA(`@Entity`·`@Table`)·Spring Data·Web·Kafka·`org.springframework.context.annotation.*`(`@Configuration`/`@Bean`)·infrastructure 타입 import는 domain에서 **여전히 금지**다. 생성자 주입은 그대로 유지한다 (`@Autowired` 필드 주입 금지).
 - **`@Configuration`이 여전히 필요한 경우**: 프레임워크/서드파티 빈(우리가 애노테이트할 수 없는 클래스 — `ObjectMapper`·`RestClient`·`KafkaTemplate` 커스터마이징·`WebClient` 등), 조건부/프로퍼티 바인딩 설정은 `@Configuration`을 쓴다. 금지 대상은 **우리 소유 서비스(DomainService·UseCase)를 `@Bean`으로 수동 배선하는 Config**다.
-- **같은 prefix의 설정값이 2개 이상이면 `@ConfigurationProperties` data class로 묶는다** — 생성자 파라미터 `@Value`는 값 1개짜리 단순 주입에 한해 infrastructure에서만 허용한다 (domain·application 주입 금지는 "피처 플래그" 절 그대로). 기간은 `Duration`, 필수 값은 non-null + `@Validated`로 기동 시점에 실패시킨다. 이미 `@Value`로 읽는 prefix에 값을 추가할 때는 그 prefix를 `@ConfigurationProperties`로 전환한다. 설정 data class의 기본값은 선택 설정에만 쓴다 (Entity 생성자 기본값 금지인 no-default-constructor-values와 별개).
+- **같은 prefix의 설정값이 2개 이상이면 `@ConfigurationProperties` data class로 묶는다** — 생성자 파라미터 `@Value`는 값 1개짜리 단순 주입에 한해 infrastructure에서만 허용한다 (domain·application 주입 금지는 "피처 플래그" 절 그대로). 기간은 `Duration`, 필수 값은 non-null + `@Validated`로 기동 시점에 실패시킨다. 설정 data class는 infrastructure에 두고, domain·application에는 Gateway나 값 객체로 노출한다 (domain은 `@Service`/`@Component` 외 Spring import 금지). 이미 `@Value`로 읽는 prefix에 값을 추가할 때는 그 prefix를 `@ConfigurationProperties`로 전환한다. 설정 data class의 기본값은 선택 설정에만 쓴다 (Entity 생성자 기본값 금지인 no-default-constructor-values와 별개).
 - **DI 애노테이션으로 기능 토글 금지**: `@ConditionalOnProperty`/`@Profile`은 여전히 금지(no-conditional-on-property) — 컴포넌트 스캔은 무조건 등록이고, on/off는 런타임 플래그로 분기한다.
 
 ### infrastructure는 얇은 어댑터 — 비즈니스 흐름 금지
@@ -312,7 +312,7 @@ class PaymentGatewayImpl(
 
 ## 백그라운드 작업·캐시
 
-- **주기 작업은 Spring이 관리한다** — infrastructure 어댑터의 `@Scheduled(fixedDelayString = "${설정키}")`(또는 주입받은 `TaskScheduler`)로 트리거만 걸고, 판단 로직은 두지 않는다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다. 주기 값은 `@ConfigurationProperties`의 같은 키를 쓴다.
+- **주기 작업은 Spring이 관리한다** — infrastructure 어댑터의 `@Scheduled(fixedDelayString = "${설정키}")`(설정 값은 `PT5M` 같은 ISO-8601 `Duration` 표기)(또는 주입받은 `TaskScheduler`)로 트리거만 걸고, 판단 로직은 두지 않는다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다. 주기 값은 `@ConfigurationProperties`의 같은 키를 쓴다.
 - **기동 직후 한 번 채워야 하는 값**은 infrastructure 어댑터의 `@PostConstruct`에서 동기 로드한다 — 실패 시 정책(기동 중단 vs 기본값으로 시작)을 코드와 문서에 명시한다. domain 서비스는 외부 호출을 하지 않는다.
 - **메모리 캐시는 불변 스냅샷 + `AtomicReference` 교체**로 구현한다 — 조회 경로는 스냅샷만 읽어 호출 스레드를 막지 않는다. 갱신은 완성된 새 스냅샷을 `set`하는 것으로만 한다(부분 갱신 금지). 시각 판정은 스냅샷이 캡슐화한다 (`isStale(maxStale)` 내부에서 `ZonedDateTime.now()` — `Clock` 주입·시간 인자 금지).
 - **갱신 실패 시 정책을 명시**한다 — 마지막 성공 값을 유지하는 최대 시간(`maxStale`)과 초과 후 동작(기본값 폴백)을 설정으로 두고, 폴백 전환은 `warn` 로그에 더해 알림 가능한 지표로 남긴다.
