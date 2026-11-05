@@ -50,7 +50,7 @@ paths:
 
 | 레이어 | 책임 | 허용 의존 | 금지 |
 |---|---|---|---|
-| **presentation** | 라우팅(Controller), 인증, Request→Command 변환, UseCase 호출, **Kafka Consumer/EventListener** (외부 이벤트 진입점) | application | 비즈니스 로직 |
+| **presentation** | 라우팅(Controller), 인증, Request→Command 변환, UseCase 호출, **Kafka Consumer/EventListener** (외부 이벤트 진입점), **UseCase 스케줄 트리거·비동기 진입점** (`~Scheduler.kt`) | application | 비즈니스 로직 |
 | **application** | UseCase 단위 오케스트레이션 | domain | Repository/Gateway/DomainEventPublisher 직접 참조, 비즈니스 로직 |
 | **domain** | 순수 비즈니스 로직 (Rich Domain Model), Repository·Gateway·DomainEventPublisher **interface 정의** | (없음, 단 Spring stereotype 애노테이션은 예외) | Infrastructure 참조, 다른 도메인 패키지 import |
 | **infrastructure** | Domain interface 구현체 (Repository/Gateway/DomainEventPublisher), 기술 어댑터 (DB·Kafka·외부 API) | domain | — |
@@ -157,7 +157,7 @@ class MatchPostingsUseCase(
 
 1. UseCase 1개 = 행위 1개 = 클래스 1개
 2. `execute()` 10줄 이내
-3. `@Transactional`은 UseCase에 선언
+3. `@Transactional`은 UseCase에 선언 — 예외: 재시도·백오프가 있는 외부 호출을 하는 UseCase는 `@Transactional`을 붙이지 않는다. 호출 결과를 저장해야 하면 저장은 `@Transactional` UseCase로 분리하고, presentation 진입점이 외부 호출 UseCase → 저장 UseCase 순으로 호출한다
 4. **DomainService만 호출** — Repository/Gateway/EventPublisher 직접 참조 절대 금지
 5. 비즈니스 로직(검증/상태전이/계산) 금지 — Entity/DomainService 위임. UseCase 내부 `if + throw` 비즈니스 검증 금지
 
@@ -312,11 +312,38 @@ class PaymentGatewayImpl(
 
 ## 백그라운드 작업·캐시
 
-- **주기 작업은 Spring이 관리한다** — infrastructure 어댑터의 `@Scheduled(fixedDelayString = "${설정키}")`(또는 주입받은 `TaskScheduler`)로 트리거만 걸고, 판단 로직은 두지 않는다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다. 주기 값은 `@ConfigurationProperties`의 같은 키를 쓰고, 설정 값은 `PT5M` 같은 ISO-8601 `Duration` 표기로 둔다.
+- **어댑터 자체 갱신 주기 작업은 Spring이 관리한다** (UseCase 주기 실행은 presentation `~Scheduler` — "Spring 프레임워크 활용" 표) — infrastructure 어댑터의 `@Scheduled(fixedDelayString = "${설정키}")`(또는 주입받은 `TaskScheduler`)로 트리거만 걸고, 판단 로직은 두지 않는다. 주기 작업을 위해 `Executors.new...`·`Thread(...)`를 직접 만들어 수명주기(`InitializingBean`/`DisposableBean`)를 손수 관리하지 않는다. 주기 값은 `@ConfigurationProperties`의 같은 키를 쓰고, 설정 값은 `PT5M` 같은 ISO-8601 `Duration` 표기로 둔다.
 - **기동 직후 한 번 채워야 하는 값**은 infrastructure 어댑터의 `@PostConstruct`에서 동기 로드한다 — 실패 시 정책(기동 중단 vs 기본값으로 시작)을 코드와 문서에 명시한다. domain 서비스는 외부 호출을 하지 않는다.
 - **메모리 캐시는 불변 스냅샷 + `AtomicReference` 교체**로 구현한다 — 조회 경로는 스냅샷만 읽어 호출 스레드를 막지 않는다. 갱신은 완성된 새 스냅샷을 `set`하는 것으로만 한다(부분 갱신 금지). 시각 판정은 스냅샷이 캡슐화한다 (`isStale(maxStale)` 내부에서 `ZonedDateTime.now()` — `Clock` 주입·시간 인자 금지).
 - **갱신 실패 시 정책을 명시**한다 — 마지막 성공 값을 유지하는 최대 시간(`maxStale`)과 초과 후 동작(기본값 폴백)을 설정으로 두고, 폴백 전환은 `warn` 로그에 더해 알림 가능한 지표로 남긴다.
 - **역할 분리** — `maxStale` 판정·폴백 같은 정책은 스냅샷 객체(domain 또는 어댑터 내부 값 객체)가 갖고, 스케줄 트리거·외부 호출·`AtomicReference` 교체는 infrastructure 어댑터가 한다. domain 서비스는 스레드·스케줄러·외부 호출을 가지지 않는다.
+
+## Spring 프레임워크 활용 (적극 활용)
+
+- **프레임워크가 제공하는 기능은 직접 만들지 않는다.** 스레드풀·재시도 루프·캐시 맵·인증 헤더 인코딩·입력 검증·예외→응답 변환을 손으로 구현하기 전에 아래 표의 Spring 기능으로 되는지 먼저 확인한다. 직접 구현하면 "제공 기능으로 안 되는 이유"를 PR 본문 "추가 유의사항"에 1줄 남긴다. 필요한 의존성이 없으면 추가한다.
+- **도메인 순수성은 그대로 유지한다** — 아래 기능은 표의 레이어에서만 쓴다. domain은 `@Service`/`@Component` 외 Spring import 금지 ("DI: 컴포넌트 스캔" 절).
+
+| 목적 | Spring 기능 | 위치 | 대체되는 직접 구현 |
+|---|---|---|---|
+| 입력 형식 검증 | Bean Validation — Request에 `@field:NotBlank`·`@field:Positive` 등 + Controller `@Valid` | presentation | Controller 안 `if` 검증 나열 (비즈니스 검증은 Entity, 형식 검증만 여기) |
+| 예외 → 응답 변환 | `@RestControllerAdvice` + `ProblemDetail` (레포에 기존 에러 응답 포맷이 있으면 그 포맷이 우선) | presentation | Controller별 try-catch |
+| 설정 바인딩 | `@ConfigurationProperties` (+ `@Validated`) | infrastructure | `@Value` 산재 ("DI" 절) |
+| UseCase 주기 실행 | `@Scheduled` + `@EnableScheduling` — UseCase를 호출하는 트리거 | presentation (의존 방향상 infrastructure는 application을 호출할 수 없다) | `Executors.new...`·`Thread` 직접 생성 |
+| 어댑터 자체 갱신 | `@Scheduled` — 어댑터 내부 스냅샷 갱신 ("백그라운드 작업·캐시" 절) | infrastructure | 수제 `ScheduledExecutorService` |
+| 비동기 실행 | `@Async("전용 TaskExecutor 빈 이름")` + `@EnableAsync` — 호출 스레드의 트랜잭션·`ThreadLocal`(보안 컨텍스트·MDC)은 전파되지 않는다 | presentation (진입점에서 UseCase 비동기 호출) | `Thread`·`CompletableFuture.runAsync` 기본 풀 |
+| 재시도 | 레포 Spring 버전에 맞는 **한 가지로 고정** — Framework 7+: core `@Retryable` + `@EnableResilientMethods` / 6.x: spring-retry `@Retryable`·`@Recover` + `@EnableRetry` + AOP 의존성. 멱등한 호출에만 붙이고, 호출 UseCase는 `@Transactional`을 붙이지 않는다 (백오프 동안 DB 트랜잭션을 잡지 않게 — "UseCase 규칙" 3의 예외) | infrastructure (`GatewayImpl`) | `for`/`while` 재시도 루프 |
+| 메서드 결과 캐시 | `@Cacheable`/`@CacheEvict` + `@EnableCaching` + **TTL·최대 크기를 설정한 CacheManager**(예: Caffeine — TTL 없는 기본 `ConcurrentMapCache` 금지). 캐시 값은 불변 타입(domain 값 객체 또는 infrastructure 내부 외부 API 응답 DTO)만, 가변 Entity·application Response 캐시 금지 | infrastructure (`RepositoryImpl`·`GatewayImpl`) | `ConcurrentHashMap` 수제 캐시. 주기 갱신 + "실패 시 마지막 값 유지" 정책이 필요하면 "백그라운드 작업·캐시"의 스냅샷, 그 외(정책 없는 목록 포함)는 `@Cacheable` |
+| 외부 HTTP 호출 | `RestClient` + 선언형 `@HttpExchange` 인터페이스(`HttpServiceProxyFactory`), 타임아웃은 클라이언트 빈에 명시 | infrastructure (`GatewayImpl`에만 DI) | 호출마다 URL·헤더 문자열 조립. 블로킹 호출에 `WebClient.block()` 금지 (리액티브 흐름에서만 `WebClient`) |
+| 인증 헤더 | 클라이언트 빈의 `defaultHeaders`·요청 인터셉터, 개별 호출은 `setBasicAuth`/`setBearerAuth` ("외부 API 호출 구조" 절) | infrastructure | `Base64` 직접 인코딩 |
+| 단순 조회 | Spring Data 파생 쿼리 메서드(`findByStatusAndOwnerId`) — **단일 테이블·조건 3개 이하·join 없음·동적 조건 없음**일 때만 | infrastructure (`JpaRepository`) | 위 기준 안의 조회를 QueryDSL로 작성. 기준을 넘으면 QueryDSL CustomRepositoryImpl. `@Query`는 여전히 금지 (비관적 락 `@Lock + @Query` 예외 유지) |
+| 읽기 전용 트랜잭션 | 조회 UseCase에 `@Transactional(readOnly = true)` | application | 읽기에 쓰기 트랜잭션 사용 |
+| 지표·헬스 | Micrometer `MeterRegistry`·Actuator `HealthIndicator` | infrastructure | 로그로만 남기는 폴백 전환·장애 신호 (domain·application에 `MeterRegistry` 주입 금지) |
+
+- **프록시 기반 기능은 자기 호출에 적용되지 않는다** — `@Transactional`·`@Cacheable`·`@Async`·`@Retryable`을 붙인 메서드를 같은 클래스 안에서 호출하면 동작하지 않는다. 별도 빈으로 분리해 주입받아 호출한다.
+- **Kotlin 프록시 대상 클래스는 `open`이어야 한다** — `kotlin("plugin.spring")`(all-open)이 적용돼 있는지 확인하고, 클래스마다 `open`을 수동으로 붙이지 않는다.
+- **Kotlin 애노테이션은 use-site target을 명시한다** — data class 프로퍼티의 검증은 `@field:NotBlank`처럼 붙인다 (생략하면 생성자 파라미터에만 붙어 동작하지 않는다). `@Validated` `@ConfigurationProperties` data class의 검증 애노테이션도 같다.
+- **애노테이션은 책임 레이어 밖으로 새지 않는다** — `@Cacheable`·`@Async`·`@Retryable`·`@Scheduled`를 domain·UseCase에 붙이지 않는다. 기능 on/off를 `@ConditionalOnProperty`·`@Profile`로 분기하는 것은 계속 금지다 (no-conditional-on-property).
+- **프록시 기반 기능은 Spring 컨텍스트 테스트로 검증한다** — 캐시 적중·재시도 횟수·트랜잭션 롤백은 MockK 단위 테스트로 확인할 수 없다. infrastructure·presentation 통합 테스트(Kotest + Spring 컨텍스트 + TestContainers)에서 검증한다.
 
 ## 코틀린 함수형 프로그래밍 (적극 활용)
 
@@ -352,6 +379,7 @@ class PaymentGatewayImpl(
 |---|---|---|
 | Controller | presentation | `~ApiController.kt` |
 | Kafka Consumer / EventListener | presentation | `~EventWorker.kt` |
+| UseCase 스케줄 트리거·비동기 진입점 | presentation | `~Scheduler.kt` |
 | UseCase | application | `~UseCase.kt` |
 | Entity | domain | 도메인명 (`Rental.kt`) |
 | Domain Repository (DB 영속화) | domain | `~Repository.kt` (interface) |
@@ -463,6 +491,33 @@ fun process(id: Long): Result {
 }
 ```
 
+### 가독성 원칙
+
+코드는 쓰는 시간보다 읽는 시간이 길다. 아래는 위 한도(메서드 길이·depth)에 더해 **읽는 사람이 위에서 아래로 한 번에 이해하는 것**을 기준으로 한다. 등급은 [private-code-review-criteria](./private-code-review-criteria.md)를 따른다 — 축약어는 p2, 그 외 이 소절의 위반은 p3.
+
+- **이름이 설명한다** — 축약어 금지(`ws`·`msg`·`req`·`cfg` → 풀네임). Boolean은 `is`·`has`·`can`·`should` 접두, 컬렉션은 복수형, 단위가 있는 값은 타입(`Duration`) 또는 이름(`timeoutMillis`)에 드러낸다.
+- **조건식에 이름을 붙인다** — `&&`·`||`가 3개 이상이거나 부정이 섞인 조건은 설명 변수 또는 Entity 메서드(`rental.isReturnable()`)로 추출한다.
+- **플래그 인자 금지** — Boolean 파라미터로 동작이 갈리면 메서드를 둘로 나누거나 enum·sealed로 표현한다 (`sendMail(user, true)` ✗ → `sendWelcomeMail(user)` ✓).
+- **Entity·DomainService 메서드 인자는 3개 이하** — 넘으면 Command·값 객체로 묶는다. 생성자(Entity·data class·DI 생성자)는 대상이 아니며 "생성자/함수 호출 포맷" 표를 따른다.
+- **명령과 조회를 분리한다** — 상태를 바꾸는 메서드는 계산 결과를 겸해 반환하지 않고, 조회 메서드는 상태를 바꾸지 않는다. 예외: 저장 결과(식별자가 부여된 Entity) 반환, `pullDomainEvents()`.
+- **위에서 아래로 읽히게 배치한다 (stepdown)** — 클래스 안 순서는 프로퍼티 → public 메서드 순이고, 각 public 메서드가 호출하는 private 헬퍼는 그 메서드 바로 아래에 둔다. 여러 곳에서 쓰는 헬퍼는 처음 호출하는 메서드 아래에 둔다.
+- **중첩을 얕게** — 람다 안의 람다(깊이 2)까지 허용하고, 깊이 3부터는 메서드로 추출한다. `.map {}.filter {}`처럼 이어 붙인 체인은 중첩이 아니다. 값을 만드는 분기는 `if`/`when` **식**으로 쓰고 `else`가 연쇄되는 `var` 재할당을 피한다.
+- **주석은 "왜"만** — "무엇"은 이름으로 표현한다. 주석 처리된 코드를 남기지 않고, `TODO`는 티켓 ID를 동반한다. KDoc은 이름만으로 계약이 불분명한 공개 API에 한한다.
+- **죽은 코드를 남기지 않는다** — 미사용 import·메서드·파라미터·분기는 같은 PR에서 지운다.
+- **구현 중복은 세 번째에서 추출한다** — 두 번째 중복은 허용하고, 우연히 닮은 코드를 억지로 공통화하지 않는다. 단 **같은 비즈니스 정책(검증·계산·상태 전이)의 중복은 두 번째에서 바로** Entity·DomainService로 모은다 — 정책이 두 곳에서 갈라지는 것을 막기 위해서다.
+- **구현 클래스(테스트 제외)가 300줄을 넘으면 책임 분리를 검토**하고, 유지한다면 PR 본문 "추가 유의사항"에 근거를 남긴다.
+- **테스트도 읽혀야 한다** — 테스트 하나는 행위 하나만 검증하고, 이름은 행위를 문장으로 서술한다. 입력·기대 값은 이름 있는 fixture로 두며 Given/When/Then 구획을 구분한다.
+
+```kotlin
+// ❌ 조건이 암호 / 플래그 인자
+if (rental.status == RentalStatus.RENTED && !rental.isOverdue || rental.renterId == requesterId) { ... }
+notify(renterId, true)
+
+// ✅ 조건에 이름 / 의도가 드러나는 메서드
+if (rental.isReturnableBy(requesterId)) { ... }   // 다른 도메인은 ID(Long)만 받는다
+notifyReturnCompleted(renterId)
+```
+
 ## 생성자/함수 호출 포맷
 
 | 조건 | 스타일 |
@@ -515,7 +570,7 @@ class PlanChangedEventWorker(
 | domain | Entity, DomainService | 단위 | Kotest BehaviorSpec + MockK |
 | application | UseCase | 단위 | Kotest + MockK (DomainService 모킹) |
 | infrastructure | Repository·Gateway·DomainEventPublisher 구현 | 통합 | Kotest + TestContainers (MySQL/Redis/Kafka) |
-| presentation | Controller, EventWorker, EventListener | 통합 | Kotest + MockMvc/WebTestClient + TestContainers |
+| presentation | Controller, EventWorker, EventListener, Scheduler | 통합 | Kotest + MockMvc/WebTestClient + TestContainers |
 | scenario | E2E 비즈니스 플로우 | 시나리오 통합 | 전체 시나리오 (가입→등록→대여→반납 등) |
 
 - 실 DB 없이 Mock만 작성한 통합 테스트는 테스트 누락과 동일하게 취급 (p2)
