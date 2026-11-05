@@ -318,6 +318,29 @@ class PaymentGatewayImpl(
 - **갱신 실패 시 정책을 명시**한다 — 마지막 성공 값을 유지하는 최대 시간(`maxStale`)과 초과 후 동작(기본값 폴백)을 설정으로 두고, 폴백 전환은 `warn` 로그에 더해 알림 가능한 지표로 남긴다.
 - **역할 분리** — `maxStale` 판정·폴백 같은 정책은 스냅샷 객체(domain 또는 어댑터 내부 값 객체)가 갖고, 스케줄 트리거·외부 호출·`AtomicReference` 교체는 infrastructure 어댑터가 한다. domain 서비스는 스레드·스케줄러·외부 호출을 가지지 않는다.
 
+## Spring 프레임워크 활용 (적극 활용)
+
+- **프레임워크가 제공하는 기능은 직접 만들지 않는다.** 스레드풀·재시도 루프·캐시 맵·인증 헤더 인코딩·입력 검증·예외→응답 변환을 손으로 구현하기 전에 아래 표의 Spring 기능으로 되는지 먼저 확인한다. 직접 구현하면 "제공 기능으로 안 되는 이유"를 PR에 1줄 남긴다. 필요한 의존성이 없으면 추가한다.
+- **도메인 순수성은 그대로 유지한다** — 아래 기능은 표의 레이어에서만 쓴다. domain은 `@Service`/`@Component` 외 Spring import 금지 ("DI: 컴포넌트 스캔" 절).
+
+| 목적 | Spring 기능 | 위치 | 대체되는 직접 구현 |
+|---|---|---|---|
+| 입력 형식 검증 | Bean Validation — Request에 `@field:NotBlank`·`@field:Positive` 등 + Controller `@Valid` | presentation | Controller 안 `if` 검증 나열 (비즈니스 검증은 Entity, 형식 검증만 여기) |
+| 예외 → 응답 변환 | `@RestControllerAdvice` + `ProblemDetail` | presentation | Controller별 try-catch |
+| 설정 바인딩 | `@ConfigurationProperties` (+ `@Validated`) | infrastructure | `@Value` 산재 ("DI" 절) |
+| 주기·비동기 실행 | `@Scheduled`, `@Async("전용 TaskExecutor 빈 이름")` | infrastructure·presentation (트리거만) | `Executors.new...`·`Thread` 직접 생성 |
+| 재시도 | `@Retryable`/`@Recover`(spring-retry) 또는 `RetryTemplate` — 멱등한 호출에만 | infrastructure (`GatewayImpl`) | `for`/`while` 재시도 루프 |
+| 메서드 결과 캐시 | `@Cacheable`/`@CacheEvict` | infrastructure (`RepositoryImpl`·`GatewayImpl`) | `ConcurrentHashMap` 수제 캐시. 갱신 주기·폴백 정책이 있는 목록 캐시는 "백그라운드 작업·캐시"의 스냅샷 |
+| 외부 HTTP 호출 | `RestClient` + 선언형 `@HttpExchange` 인터페이스(`HttpServiceProxyFactory`), 타임아웃은 클라이언트 빈에 명시 | infrastructure (`GatewayImpl`에만 DI) | 호출마다 URL·헤더 문자열 조립. 블로킹 호출에 `WebClient.block()` 금지 (리액티브 흐름에서만 `WebClient`) |
+| 단순 조회 | Spring Data 파생 쿼리 메서드(`findByStatusAndOwnerId`) | infrastructure (`JpaRepository`) | 단순 조회마다 QueryDSL 작성. 복잡 쿼리만 QueryDSL, `@Query`는 여전히 금지 |
+| 읽기 전용 트랜잭션 | 조회 UseCase에 `@Transactional(readOnly = true)` | application | 읽기에 쓰기 트랜잭션 사용 |
+| 지표·헬스 | Micrometer `MeterRegistry`·Actuator `HealthIndicator` | infrastructure | 로그로만 남기는 폴백 전환·장애 신호 (domain·application에 `MeterRegistry` 주입 금지) |
+
+- **프록시 기반 기능은 자기 호출에 적용되지 않는다** — `@Transactional`·`@Cacheable`·`@Async`·`@Retryable`을 붙인 메서드를 같은 클래스 안에서 호출하면 동작하지 않는다. 별도 빈으로 분리해 주입받아 호출한다.
+- **Kotlin 프록시 대상 클래스는 `open`이어야 한다** — `kotlin("plugin.spring")`(all-open)이 적용돼 있는지 확인하고, 클래스마다 `open`을 수동으로 붙이지 않는다.
+- **Kotlin 애노테이션은 use-site target을 명시한다** — data class 프로퍼티의 검증은 `@field:NotBlank`처럼 붙인다 (생략하면 생성자 파라미터에만 붙어 동작하지 않는다).
+- **애노테이션은 책임 레이어 밖으로 새지 않는다** — `@Cacheable`·`@Async`·`@Retryable`을 domain·UseCase에 붙이지 않는다. 기능 on/off를 `@ConditionalOnProperty`·`@Profile`로 분기하는 것은 계속 금지다 (no-conditional-on-property).
+
 ## 코틀린 함수형 프로그래밍 (적극 활용)
 
 - 컬렉션 변환은 루프 대신 함수형 체인 — `map`/`filter`/`groupBy`/`fold`/`associateBy`. 단 한 체인이 3단계를 넘어 읽기 어려우면 중간 변수로 분리한다.
@@ -461,6 +484,33 @@ fun process(id: Long): Result {
     if (!entity.isValid()) throw InvalidException()
     return entity.process()
 }
+```
+
+### 가독성 원칙
+
+코드는 쓰는 시간보다 읽는 시간이 길다. 아래는 위 한도(메서드 길이·depth)에 더해 **읽는 사람이 위에서 아래로 한 번에 이해하는 것**을 기준으로 한다. 위반은 코드 리뷰 p3(사소한 가독성)이며, 위에 명시된 한도는 기존 등급을 따른다.
+
+- **이름이 설명한다** — 축약어 금지(`ws`·`msg`·`req`·`cfg` → 풀네임). Boolean은 `is`·`has`·`can`·`should` 접두, 컬렉션은 복수형, 단위가 있는 값은 타입(`Duration`) 또는 이름(`timeoutMillis`)에 드러낸다.
+- **조건식에 이름을 붙인다** — `&&`·`||`가 3개 이상이거나 부정이 섞인 조건은 설명 변수 또는 Entity 메서드(`rental.isReturnable()`)로 추출한다.
+- **플래그 인자 금지** — Boolean 파라미터로 동작이 갈리면 메서드를 둘로 나누거나 enum·sealed로 표현한다 (`sendMail(user, true)` ✗ → `sendWelcomeMail(user)` ✓).
+- **인자는 3개 이하를 목표** — 넘으면 Command·값 객체로 묶는다 ("생성자/함수 호출 포맷" 표와 함께 적용).
+- **명령과 조회를 분리한다** — 상태를 바꾸는 메서드는 계산 결과를 겸해 반환하지 않고, 조회 메서드는 상태를 바꾸지 않는다. 예외: 저장 결과(식별자가 부여된 Entity) 반환, `pullDomainEvents()`.
+- **위에서 아래로 읽히게 배치한다** — 클래스 안 순서는 프로퍼티 → public 메서드(호출 흐름 순) → private 헬퍼. 호출하는 메서드 바로 아래에 호출되는 메서드를 둔다.
+- **중첩을 얕게** — 람다·스코프 함수 중첩은 1단계까지, 2단계부터는 메서드로 추출한다. 값을 만드는 분기는 `if`/`when` **식**으로 쓰고 `else`가 연쇄되는 `var` 재할당을 피한다.
+- **주석은 "왜"만** — "무엇"은 이름으로 표현한다. 주석 처리된 코드를 남기지 않고, `TODO`는 티켓 ID를 동반한다. KDoc은 이름만으로 계약이 불분명한 공개 API에 한한다.
+- **죽은 코드를 남기지 않는다** — 미사용 import·메서드·파라미터·분기는 같은 PR에서 지운다.
+- **중복은 세 번째에서 추출한다** — 두 번째 중복은 허용하고, 우연히 닮은 코드를 억지로 공통화하지 않는다 ("패턴은 문제가 있을 때 도입" 원칙과 같다).
+- **클래스가 300줄을 넘으면 책임 분리를 검토**하고, 유지한다면 PR에 근거를 남긴다.
+- **테스트도 읽혀야 한다** — 테스트 하나는 행위 하나만 검증하고, 이름은 행위를 문장으로 서술한다. 입력·기대 값은 이름 있는 fixture로 두며 Given/When/Then 구획을 구분한다.
+
+```kotlin
+// ❌ 조건이 암호 / 플래그 인자
+if (rental.status == RentalStatus.RENTED && !rental.isOverdue || user.isAdmin) { ... }
+notify(user, true)
+
+// ✅ 조건에 이름 / 의도가 드러나는 메서드
+if (rental.isReturnableBy(user)) { ... }
+notifyReturnCompleted(user)
 ```
 
 ## 생성자/함수 호출 포맷
