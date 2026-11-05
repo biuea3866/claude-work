@@ -8,20 +8,25 @@
   상세 페이지 = /#session=<id> (데이터 /api/session?id=<id>)
 
 환경 변수
-  ORCA_CLI_COMMAND     Orca CLI 실행 명령 (shlex 분리, 기본 "orca")
-  CLAUDE_PROJECTS_DIR  Claude Code transcript 루트 (기본 ~/.claude/projects, 읽기 전용)
+  ORCA_CLI_COMMAND            Orca CLI 실행 명령 (shlex 분리, 기본 "orca")
+  CLAUDE_PROJECTS_DIR         Claude Code transcript 루트 (기본 ~/.claude/projects, 읽기 전용)
+  ORCA_DASHBOARD_HISTORY_DIR  serve 관측 히스토리 디렉토리 (기본 ~/.harness/runs/orca-dashboard)
 
 호출하는 Orca 명령은 읽기 전용뿐이다: worktree ps · terminal list · terminal read.
+serve 만 관측 히스토리(history.jsonl)를 기록한다 — snapshot 은 아무것도 쓰지 않는다.
 """
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import fcntl
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -54,11 +59,16 @@ STEP_FORECAST_RE = re.compile(r"다음|이후|next", re.I)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n")
 PIPELINE_NAME_RE = re.compile(r"private-[a-z][a-z-]*")
 COMMENT_PROGRESS_RE = re.compile(r"진행\s*(\d{1,3})\s*%")
-COMPLETION_RE = re.compile(r"머지했|merged=true|완료했습니다|모두 끝났습니다")
+# H24 — 결정적 완료 신호(머지 보고)만. `완료했습니다`·`모두 끝났습니다` 같은 일반 문구는 완료가 아니다
+COMPLETION_SIGNAL_RE = re.compile(r"머지했|merged=true")
+COMPLETION_BASIS = "완료 보고"
+# H26 — Step 추출 전에 제거하는 괄호 구간(예시·부연). 안쪽부터 반복 제거해 중첩도 처리한다
+PARENTHESIZED_RE = re.compile(r"\([^()（）]*\)|（[^()（）]*）")
+# H29 — 인용 영역(코드 펜스·인라인 코드·따옴표)은 신호·Step 판정에서 제외한다
+QUOTED_RE = re.compile(r"```.*?```|`[^`\n]*`|\"[^\"\n]*\"|“[^”\n]*”|「[^」\n]*」|(?<![A-Za-z0-9])'[^'\n]*'(?![A-Za-z0-9])", re.S)
 ERROR_LINE_RE = re.compile(
     r"BUILD FAILED|(?<![A-Za-z0-9_])FAILED(?![A-Za-z0-9_])|Traceback|Error:|exit code [1-9]"
 )
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n")
 REQUEST_RE = re.compile(
     r"지시하시면|알려\s?주세요|할까요|하시겠어요|정해\s?주세요|선택해\s?주세요"
     r"|승인해\s?주세요|확인해\s?주세요|\?\s*$"
@@ -82,6 +92,40 @@ NOTIFICATION_FIELD_RE = {
 }
 NOTIFICATION_EXIT_CODE_RE = re.compile(r"exit code (\d+)")
 NOTIFICATION_FAILED_STATUSES = ("failed", "killed", "error")
+QUEUED_COMMAND_TYPE = "queued_command"
+INTERRUPT_PREFIX = "[Request interrupted by user"
+NON_REQUEST_PREFIXES = (
+    TASK_NOTIFICATION_PREFIX,
+    CONTINUATION_PREFIX,
+    "Base directory for this skill:",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    INTERRUPT_PREFIX,
+)
+SLASH_COMMAND_PREFIXES = ("<command-name>", "<command-message>")
+COMMAND_NAME_RE = re.compile(r"<command-name>/([^<\s]+)</command-name>")
+COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+REQUEST_COMMAND_PREFIX = "private-"  # 등록 파이프라인 슬래시 호출만 요청 (parse_transcript 는 pipelines 를 모른다)
+RUN_DIRECTORY_RE = re.compile(r"runs/([a-z][a-z0-9-]*)/(\d{8}-[a-z0-9-]+)")
+HEREDOC_START_RE = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+SHORT_FOLLOWUP_RE = re.compile(
+    r"(?:승인|머지|푸시|커밋|진행|계속|이어서|좋아|고고)(?:해|해줘|해 줘|해요|하자|해주세요)?"
+    r"|네|응|ㅇㅇ|ok|yes|넵|예|\d{1,2}번?",
+    re.I,
+)
+SHORT_FOLLOWUP_TRAILING_CHARS = " .!?~"
+SHELL_UNPARSEABLE_MARKERS = ("$(", "`")
+SHELL_SEPARATOR_CHARS = ";&|\n"
+SHELL_REDIRECTION_CHARS = "<>"
+SHELL_OPERATOR_CHARS = SHELL_SEPARATOR_CHARS + SHELL_REDIRECTION_CHARS
+SHELL_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+SHELL_VARIABLE_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+WORK_RESULTS = ("completed", "in_progress", "answered", "interrupted")
+HISTORY_SCHEMA_VERSION = 1
+HISTORY_TRACKED_FIELDS = ("status", "percent", "basis", "pipeline", "step")
+HISTORY_POINTS_PER_SESSION = 500
+HISTORY_COMPACT_LINES = 20_000
+HISTORY_FILE_NAME = "history.jsonl"
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -245,11 +289,28 @@ def _round_half_up_percent(index: int, total: int) -> int:
     return (2 * index * 100 + total) // (2 * total)
 
 
+def _without_parentheses(text: str) -> str:
+    """H26 — 괄호 `(…)`·`（…）` 안의 텍스트(예시·부연)를 제거. 중첩은 안쪽부터 반복 제거한다."""
+    while True:
+        stripped = PARENTHESIZED_RE.sub(" ", text)
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def _without_quoted(text: str | None) -> str:
+    """H29 — 코드 펜스·인라인 코드·따옴표 안 텍스트를 제거 (설명·인용 속 신호 오인 방지)."""
+    return QUOTED_RE.sub(" ", text or "")
+
+
 def _current_steps(text: str) -> list[int]:
-    """예고 문장(`다음`·`이후`·`next` 포함)을 뺀 문장들의 `Step N` 번호 (등장 순)."""
+    """괄호 안(H26)과 예고 문장(`다음`·`이후`·`next` 포함)을 뺀 문장들의 `Step N` 번호 (등장 순).
+
+    세션 카드·체크리스트·작업 히스토리가 모두 이 함수로 현재 Step 을 판정한다.
+    """
     return [
         int(match.group(1))
-        for sentence in SENTENCE_SPLIT_RE.split(text)
+        for sentence in SENTENCE_SPLIT_RE.split(_without_parentheses(_without_quoted(text)))
         if not STEP_FORECAST_RE.search(sentence)
         for match in STEP_MENTION_RE.finditer(sentence)
     ]
@@ -271,13 +332,21 @@ def _comment_progress(comment: str | None) -> dict | None:
     return {"percent": percent, "basis": f"worktree 코멘트: 진행 {percent}%"}
 
 
+def completion_signal(text: str | None) -> bool:
+    """H24 — 결정적 완료 신호(`머지했`·`merged=true`). 카드·체크리스트·작업 히스토리·추이 공통 판정."""
+    return COMPLETION_SIGNAL_RE.search(_without_quoted(text)) is not None
+
+
+def _completed_progress() -> dict:
+    return {"percent": 100, "basis": COMPLETION_BASIS}
+
+
 def _completion_progress(agent_state: str | None, texts: list[str]) -> dict | None:
-    if agent_state != "done":
-        return None
+    """H30 — 머지 완료 신호는 agent_state 와 무관 (카드·체크리스트·작업 히스토리·관측 공통)."""
     latest = next((text for text in _texts_newest_first(texts) if text.strip()), None)
-    if latest is None or not COMPLETION_RE.search(latest):
+    if latest is None or not completion_signal(latest):
         return None
-    return {"percent": 100, "basis": "완료 보고"}
+    return _completed_progress()
 
 
 def _pipeline_position(texts: list[str], pipelines: dict[str, list[int]]) -> tuple[str, int] | None:
@@ -289,17 +358,31 @@ def _pipeline_position(texts: list[str], pipelines: dict[str, list[int]]) -> tup
     return pipeline, pipelines[pipeline].index(step)
 
 
+def _is_last_step(steps: list[int], index: int) -> bool:
+    """H25 — 파이프라인 마지막 Step 도달 = 완료. 카드·체크리스트·작업 히스토리 공통 판정."""
+    return index == len(steps) - 1
+
+
+def _step_progress(pipeline: str, steps: list[int], index: int, *, interrupted: bool = False) -> dict:
+    """파이프라인 단계 인덱스 → 진행률. 세션 카드·작업 히스토리·추이가 같은 산식을 쓴다.
+
+    마지막 Step 이면 100% (`마지막 단계 도달`, H25). 그 외에는 index 기준 반올림 산식.
+    """
+    if _is_last_step(steps, index):
+        return {"percent": 100, "basis": f"/{pipeline} Step {steps[index]} (마지막 단계 도달)"}
+    ending = "에서 중단" if interrupted else " 진행 중"
+    return {
+        "percent": _round_half_up_percent(index, len(steps)),
+        "basis": f"/{pipeline} Step {steps[index]} ({index + 1}/{len(steps)}단계{ending})",
+    }
+
+
 def _pipeline_progress(texts: list[str], pipelines: dict[str, list[int]]) -> dict | None:
     position = _pipeline_position(texts, pipelines)
     if position is None:
         return None
     pipeline, index = position
-    steps = pipelines[pipeline]
-    step = steps[index]
-    return {
-        "percent": _round_half_up_percent(index, len(steps)),
-        "basis": f"/{pipeline} Step {step} ({index + 1}/{len(steps)}단계 진행 중)",
-    }
+    return _step_progress(pipeline, pipelines[pipeline], index)
 
 
 def estimate_progress(
@@ -336,7 +419,7 @@ def pipeline_checklist(
     if position is None:
         return None
     pipeline, current_index = position
-    finished = _completion_progress(agent_state, texts) is not None
+    finished = _completion_progress(agent_state, texts) is not None or _is_last_step(pipelines[pipeline], current_index)
     titles = (step_titles or {}).get(pipeline) or {}
     return {
         "pipeline": pipeline,
@@ -514,6 +597,7 @@ def _session(
         "pr": _pull_request(worktree.get("linkedPR")),
         "comment": worktree.get("comment"),
         "workspaceStatus": worktree.get("workspaceStatus"),
+        "workSummary": None,  # serve 가 transcript 연결 세션만 채운다
     }
 
 
@@ -721,14 +805,171 @@ def _record_content(record: dict):
     return message.get("content") if isinstance(message, dict) else None
 
 
+def _queued_command(record: dict, mode: str) -> str | None:
+    """실행 중 입력이 쌓인 attachment `queued_command` 의 prompt (commandMode 일치 시)."""
+    if record.get("type") != "attachment":
+        return None
+    attachment = record.get("attachment")
+    if not isinstance(attachment, dict) or attachment.get("type") != QUEUED_COMMAND_TYPE:
+        return None
+    prompt = attachment.get("prompt")
+    return prompt if attachment.get("commandMode") == mode and isinstance(prompt, str) else None
+
+
+def _user_texts(record: dict) -> list[str]:
+    """user 줄 텍스트 블록. tool_result 전용 줄(게이트 답변 포함)은 빈 list."""
+    return _content_texts(_record_content(record)) if record.get("type") == "user" else []
+
+
+def slash_command(text: str) -> str | None:
+    """`<command-name>/x</command-name>` 형태 슬래시 호출의 명령 이름 (x). 슬래시 호출이 아니면 None."""
+    if not text.startswith(SLASH_COMMAND_PREFIXES):
+        return None
+    match = COMMAND_NAME_RE.search(text)
+    return match.group(1) if match else None
+
+
+def is_user_request(text: str | None) -> bool:
+    """H1 — 알림·이어쓰기·스킬 주입·로컬 명령 출력·중단 표식·비파이프라인 슬래시 명령은 요청이 아니다."""
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith(NON_REQUEST_PREFIXES):
+        return False
+    command = slash_command(stripped)
+    return command is None or command.startswith(REQUEST_COMMAND_PREFIX)
+
+
 def _user_request_text(record: dict) -> str | None:
-    """사용자 요청 텍스트 — task-notification·tool_result 전용 user 줄은 요청이 아니다."""
-    if record.get("type") != "user":
-        return None
-    text = "\n".join(_content_texts(_record_content(record))).strip()
-    if not text or text.startswith((TASK_NOTIFICATION_PREFIX, CONTINUATION_PREFIX)):
-        return None
-    return text
+    """사용자 요청 텍스트 — user 텍스트 또는 queued prompt 중 is_user_request 인 것.
+
+    parse_transcript prompts · find_transcript ① · split_work_items 가 모두 이 판정을 쓴다.
+    """
+    if record.get("isMeta") is True:
+        return None  # H9 — 하네스 주입 메시지(사용 한도 안내·자동 이어가기 등)
+    if record.get("type") == "user":
+        text = "\n".join(_user_texts(record)).strip()
+    else:
+        text = (_queued_command(record, "prompt") or "").strip()
+    return text if is_user_request(text) else None
+
+
+def strip_heredocs(command: str) -> str:
+    """H10·H23 — heredoc 본문(구분자 다음 줄 ~ 구분자만 있는 줄)을 제거한 명령.
+
+    한 줄에 heredoc 이 여러 개 선언되면 선언 순서대로 각 구분자 줄까지의 본문을 모두 제거한다.
+    here-string(`<<<`)은 heredoc 이 아니다. 닫히지 않은 heredoc 은 끝까지 본문으로 본다(보수적).
+    """
+    kept: list[str] = []
+    pending: list[tuple[str, bool]] = []  # (구분자, `<<-` 여부)
+    for line in command.split("\n"):
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            # H31 — `<<` 는 정확히 같은 줄만, `<<-` 는 선행 탭만 제거 후 일치
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                pending.pop(0)
+            continue
+        kept.append(line)
+        pending = [(match.group(3), match.group(1) == "-") for match in HEREDOC_START_RE.finditer(line)]
+    return "\n".join(kept)
+
+
+def _shell_commands(command: str) -> list[list[str]]:
+    """명령 문자열 → 단순 명령(토큰 목록) 목록. `&&`·`||`·`;`·`|`·줄바꿈으로 나누고 `#` 주석은 버린다.
+
+    H27 — 따옴표 밖의 `<`·`>` 는 공백 없이 붙어 있어도 별도 연산자 토큰으로 분리된다
+    (`output>runs/x` → `output`, `>`, `runs/x`). 따옴표 안의 `<`·`>` 는 단어의 일부로 남는다.
+    shlex 가 따옴표를 풀지 못하면(짝 없는 따옴표 등) ValueError 를 올린다.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_OPERATOR_CHARS)
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    commands: list[list[str]] = [[]]
+    in_comment = False
+    for token in lexer:
+        if token and all(char in SHELL_SEPARATOR_CHARS for char in token):
+            if "\n" in token:
+                in_comment = False
+            if commands[-1]:
+                commands.append([])
+            continue
+        if in_comment or token.startswith("#"):
+            in_comment = True
+            continue
+        commands[-1].append(token)
+    return [tokens for tokens in commands if tokens]
+
+
+def _expand_variables(word: str, variables: dict[str, str]) -> str:
+    """`$NAME`·`${NAME}` 를 앞선 할당 값으로 치환 (모르는 변수는 그대로)."""
+    return SHELL_VARIABLE_RE.sub(lambda match: variables.get(match.group(1) or match.group(2), match.group(0)), word)
+
+
+def _is_redirection_operator(token: str) -> bool:
+    """`_shell_commands` 가 분리한 연산자 토큰 중 `<`·`>` 를 포함한 것 (`>`·`>>`·`>&`·`&>`·`<<<` 등)."""
+    return any(char in SHELL_REDIRECTION_CHARS for char in token) and all(char in SHELL_OPERATOR_CHARS for char in token)
+
+
+def _without_redirections(tokens: list[str]) -> list[str] | None:
+    """H22·H27 — 리다이렉션 연산자와 그 피연산자, fd 숫자 접두(`2>`의 `2`)를 뺀 토큰.
+
+    연산자는 `_shell_commands` 가 붙은 형태(`2>file`·`output>file`)까지 분리해 둔 상태다. 연산자 바로 앞의
+    숫자만으로 된 토큰은 fd 접두로 본다(공백 정보가 없어 `mkdir 2 >x` 의 `2` 도 빠지지만, 숫자 디렉토리는
+    run 경로가 될 수 없어 신호 판정에 영향이 없다). 프로세스 치환(`<(`·`>(`)·피연산자 없는 연산자는
+    해석 불가 → None.
+    """
+    kept: list[str] = []
+    skip_operand = False
+    for token in tokens:
+        if skip_operand:
+            if token.startswith("("):
+                return None
+            skip_operand = False
+            continue
+        if not _is_redirection_operator(token):
+            kept.append(token)
+            continue
+        if kept and kept[-1].isdigit():
+            kept.pop()
+        skip_operand = True
+    return None if skip_operand else kept
+
+
+def mkdir_targets(command: str) -> list[str]:
+    """H14·H22 — heredoc 을 뺀 명령에서 `mkdir` 의 대상 인자(옵션·리다이렉션 제외, 변수 치환 후).
+
+    파싱 실패·명령 치환(`$(…)`·백틱)·프로세스 치환이 있는 mkdir·치환되지 않은 변수는 신호 없음 (보수적).
+    """
+    try:
+        commands = _shell_commands(strip_heredocs(command))
+    except ValueError:
+        return []
+    variables: dict[str, str] = {}
+    targets: list[str] = []
+    for raw_tokens in commands:
+        tokens = _without_redirections(raw_tokens)
+        if tokens is None:
+            continue
+        index = 0
+        while index < len(tokens) and (assignment := SHELL_ASSIGNMENT_RE.match(tokens[index])):
+            variables[assignment.group(1)] = _expand_variables(assignment.group(2), variables)
+            index += 1
+        if index >= len(tokens) or os.path.basename(tokens[index]) != "mkdir":
+            continue
+        if any(marker in token for token in raw_tokens for marker in SHELL_UNPARSEABLE_MARKERS):
+            continue
+        options_done = False
+        for argument in tokens[index + 1:]:
+            if not options_done and argument == "--":
+                options_done = True
+            elif options_done or not argument.startswith("-"):
+                target = _expand_variables(argument, variables)
+                if "$" not in target:
+                    targets.append(target)
+    return targets
+
+
+def _is_interrupt(record: dict) -> bool:
+    return "\n".join(_user_texts(record)).strip().startswith(INTERRUPT_PREFIX)
 
 
 def _normalized(text: str | None) -> str:
@@ -790,10 +1031,15 @@ def _notification_state(status: str, summary: str | None) -> str | None:
     return "failed" if exit_code and int(exit_code.group(1)) != 0 else "completed"
 
 
+def _notification_texts(record: dict) -> list[str]:
+    queued = _queued_command(record, "task-notification")
+    return [queued] if queued is not None else _user_texts(record)
+
+
 def _notifications(record: dict) -> list[dict]:
-    """user 줄의 `<task-notification>` 블록 → [{id, state, summary}]."""
+    """user 줄·queued 알림의 `<task-notification>` 블록 → [{id, state, summary}]."""
     found = []
-    for text in _content_texts(_record_content(record)):
+    for text in _notification_texts(record):
         for body in TASK_NOTIFICATION_RE.findall(text):
             fields = {
                 field: (match.group(1).strip() if (match := pattern.search(body)) else None)
@@ -811,9 +1057,9 @@ def _finish_task(task: dict | None, state: str, ended_at: int | None, summary: s
     task.update(state=state, endedAt=ended_at, summary=summary)
 
 
-def _apply_user_record(record: dict, at: int | None, tasks: dict[str, dict], prompts: list[dict]) -> None:
-    content = _record_content(record)
-    for result in _content_blocks(content, "tool_result"):
+def _finish_tasks(record: dict, at: int | None, tasks: dict[str, dict]) -> None:
+    """user·attachment 줄의 tool_result·task-notification 으로 추적 중 task 를 종료."""
+    for result in _content_blocks(_record_content(record) if record.get("type") == "user" else None, "tool_result"):
         task = tasks.get(result.get("tool_use_id"))
         is_error = result.get("is_error") is True
         # 백그라운드 작업의 즉시 tool_result 는 "시작됨" 신호 — 종료는 task-notification 으로만 (실행 오류 제외)
@@ -822,10 +1068,23 @@ def _apply_user_record(record: dict, at: int | None, tasks: dict[str, dict], pro
             _finish_task(task, "failed" if is_error else "completed", at, summary)
     for notice in _notifications(record):
         _finish_task(tasks.get(notice["id"]), notice["state"], at, notice["summary"])
+
+
+def _apply_user_record(record: dict, at: int | None, tasks: dict[str, dict], prompts: list[dict]) -> None:
+    _finish_tasks(record, at, tasks)
     request = _user_request_text(record)
     if request is not None:
         text = _first_meaningful_line(request) or _first_line(request, PROMPT_TEXT_CHARS) or ""
         prompts.append({"at": at, "text": text[:PROMPT_TEXT_CHARS]})
+
+
+def _register_task(block: dict, at: int | None, tasks: dict[str, dict]) -> dict | None:
+    """추적 대상 tool_use 면 tasks 에 등록하고 반환 (이미 있거나 대상 아님 → None)."""
+    task = _task_from_tool_use(block, at)
+    if task is None or not task["id"] or task["id"] in tasks:
+        return None
+    tasks[task["id"]] = task
+    return task
 
 
 def _apply_assistant_record(
@@ -833,9 +1092,7 @@ def _apply_assistant_record(
 ) -> None:
     content = _record_content(record)
     for block in _content_blocks(content, "tool_use"):
-        task = _task_from_tool_use(block, at)
-        if task is not None and task["id"] and task["id"] not in tasks:
-            tasks[task["id"]] = task
+        _register_task(block, at, tasks)
     text = "\n".join(_content_texts(content))
     current = _current_steps(text)
     if current and (not steps or steps[-1]["step"] != current[-1]):
@@ -858,7 +1115,7 @@ def parse_transcript(lines: Iterable[str]) -> dict:
         at = _iso_millis(record.get("timestamp"))
         if at is not None:
             last_activity_at = at
-        if record.get("type") == "user":
+        if record.get("type") in ("user", "attachment"):
             _apply_user_record(record, at, tasks, prompts)
         elif record.get("type") == "assistant":
             _apply_assistant_record(record, at, tasks, steps)
@@ -867,6 +1124,352 @@ def parse_transcript(lines: Iterable[str]) -> dict:
         "tasks": list(tasks.values()),
         "steps": steps,
         "lastActivityAt": last_activity_at,
+    }
+
+
+# ── 작업 히스토리 (순수) ────────────────────────────────────────────────
+
+
+def is_short_followup(text: str) -> bool:
+    """H19 — 승인·재개·선택 답변 표현과 문자열 **전체**가 일치하는 요청 (끝 문장부호 `.!?~` 무시).
+
+    접두사만 같은 독립 요청(`네트워크 고쳐줘`·`응답 속도 개선`·`1번 API 수정해`)은 후속이 아니다.
+    """
+    normalized = _normalized(text).rstrip(SHORT_FOLLOWUP_TRAILING_CHARS)
+    return SHORT_FOLLOWUP_RE.fullmatch(normalized) is not None
+
+
+def _title_line(text: str | None) -> str:
+    return (_first_meaningful_line(text) or _first_line(text, TRANSCRIPT_TITLE_CHARS) or "")[:TRANSCRIPT_TITLE_CHARS]
+
+
+def _pipeline_title(pipeline: str, detail: str | None) -> str:
+    return f"/{pipeline} {_title_line(detail)}".strip()[:TRANSCRIPT_TITLE_CHARS]
+
+
+def _work_title(request: str) -> str:
+    """시작 요청의 첫 의미 있는 줄. 슬래시 호출이면 `/<p> ` + command-args 첫 줄."""
+    command = slash_command(request)
+    if command is None:
+        return _title_line(request)
+    arguments = COMMAND_ARGS_RE.search(request)
+    return _pipeline_title(command, arguments.group(1) if arguments else None)
+
+
+def _reported_completion(work: dict) -> bool:
+    """H11 — 완료는 고정: 한 번 기록된 completedAt 은 이후 응답으로 취소되지 않는다."""
+    return work["completionProgress"] is not None
+
+
+def _work_result(work: dict, final_step: int | None, pipelines: dict[str, list[int]], is_last: bool) -> str:
+    """G3 — 완료 보고 > 명시 중단(H13) > 마지막 작업 > Step 중간 정지 > 응답 종료."""
+    if _reported_completion(work):
+        return "completed"
+    if work["interrupted"]:
+        return "interrupted"
+    if is_last:
+        return "in_progress"
+    steps = (pipelines.get(work["pipeline"]) or []) if work["pipeline"] else []
+    stopped_midway = work["pipeline"] is not None and (not steps or final_step != steps[-1])
+    return "interrupted" if stopped_midway else "answered"
+
+
+def _work_progress(result: str, pipeline: str | None, step: int | None, pipelines: dict[str, list[int]]) -> dict:
+    """Step 기준 진행률 (완료된 작업은 완료 시점에 고정한 completionProgress 를 쓴다)."""
+    steps = (pipelines.get(pipeline) or []) if pipeline else []
+    if step not in steps:
+        return {"percent": None, "basis": "산정 불가"}
+    return _step_progress(pipeline, steps, steps.index(step), interrupted=result == "interrupted")
+
+
+class _WorkSplitter:
+    """transcript 레코드를 1회 순회하며 G2 '파이프라인 우선 혼합' 규칙으로 작업을 나눈다."""
+
+    def __init__(self, pipelines: dict[str, list[int]], step_titles: dict[str, dict[int, str]] | None):
+        self._pipelines = pipelines
+        self._step_titles = step_titles or {}
+        self._works: list[dict] = []
+        self._tasks: dict[str, dict] = {}
+        self._task_origin: dict[str, int] = {}
+
+    @property
+    def _current(self) -> dict | None:
+        return self._works[-1] if self._works else None
+
+    def _is_active(self, work: dict) -> bool:
+        """활성 = 파이프라인이 있고 완료(H11)·명시 중단(H13) 상태가 아님."""
+        return work["pipeline"] is not None and not _reported_completion(work) and not work["interrupted"]
+
+    def _start(self, record: dict, at: int | None, title: str, pipeline: str | None, run_id: str | None = None) -> dict:
+        uuid = record.get("uuid")
+        work = {
+            "id": uuid if isinstance(uuid, str) and uuid else f"w{len(self._works)}",
+            "title": title,
+            "startedAt": at,
+            "endedAt": at,
+            "requestCount": 0,
+            "pipeline": pipeline,
+            "runId": run_id,
+            "steps": [],
+            "completedAt": None,
+            "completionProgress": None,
+            "interrupted": False,
+            "subagents": 0,
+            "backgroundShells": 0,
+        }
+        self._works.append(work)
+        return work
+
+    def feed(self, record: dict) -> None:
+        at = _iso_millis(record.get("timestamp"))
+        if record.get("type") in ("user", "attachment"):
+            _finish_tasks(record, at, self._tasks)
+            if self._current is not None and _is_interrupt(record):
+                self._current["interrupted"] = True
+            request = _user_request_text(record)
+            if request is not None:
+                self._request(record, at, request)
+        elif record.get("type") == "assistant":
+            self._assistant(record, at)
+        if at is not None and self._current is not None:
+            self._current["endedAt"] = at
+
+    def _request(self, record: dict, at: int | None, text: str) -> None:
+        work = self._current
+        command = slash_command(text)
+        pipeline = command if command in self._pipelines else None
+        if work is None:
+            joins = False
+        elif self._is_active(work):
+            joins = pipeline is None or pipeline == work["pipeline"]
+        else:
+            joins = pipeline is None and is_short_followup(text)
+        if not joins:
+            work = self._start(record, at, _work_title(text), pipeline)
+        work["interrupted"] = False  # H13 — 귀속된 후속 요청은 재개
+        work["requestCount"] += 1
+
+    def _signal(self, block: dict) -> tuple[str, str | None, str] | None:
+        """파이프라인 시작 신호 (s2 Skill · s3 run 디렉토리 mkdir) → (pipeline, run id, 제목)."""
+        tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+        if block.get("name") == "Skill" and tool_input.get("skill") in self._pipelines:
+            return tool_input["skill"], None, _pipeline_title(tool_input["skill"], tool_input.get("args"))
+        command = tool_input.get("command")
+        if block.get("name") != "Bash" or not isinstance(command, str):
+            return None
+        for target in mkdir_targets(command):
+            match = RUN_DIRECTORY_RE.search(target)
+            if match and match.group(1) in self._pipelines:
+                return match.group(1), match.group(0), _pipeline_title(match.group(1), match.group(2))
+        return None
+
+    def _pipeline_signal(self, record: dict, at: int | None, signal: tuple[str, str | None, str]) -> None:
+        pipeline, run_id, title = signal
+        work = self._current
+        if work is None:
+            self._start(record, at, title, pipeline, run_id)
+        elif self._is_active(work):
+            other_run = run_id is not None and work["runId"] is not None and run_id != work["runId"]
+            if pipeline != work["pipeline"] or other_run:
+                self._start(record, at, title, pipeline, run_id)
+            elif run_id is not None and work["runId"] is None:
+                work["runId"] = run_id
+        elif work["pipeline"] is None and not _reported_completion(work):
+            work["pipeline"], work["runId"] = pipeline, run_id
+        else:
+            self._start(record, at, title, pipeline, run_id)
+
+    def _assistant(self, record: dict, at: int | None) -> None:
+        content = _record_content(record)
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        for block in blocks if isinstance(blocks, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                self._text(at, block["text"])
+            elif block.get("type") == "tool_use":
+                signal = self._signal(block)
+                if signal is not None:
+                    self._pipeline_signal(record, at, signal)
+                self._count_task(block, at)
+
+    def _count_task(self, block: dict, at: int | None) -> None:
+        task = _register_task(block, at, self._tasks)
+        if task is None or self._current is None:
+            return
+        self._task_origin[task["id"]] = len(self._works) - 1
+        self._current["subagents" if task["kind"] == "agent" else "backgroundShells"] += 1
+
+    @staticmethod
+    def _complete(work: dict, at: int | None, progress: dict) -> None:
+        """H11·H21 — 첫 완료 시각과 그때의 진행률을 고정한다 (이후 응답으로 바뀌지 않음)."""
+        work["interrupted"] = False
+        if not _reported_completion(work):
+            work["completedAt"], work["completionProgress"] = at, progress
+
+    def _text(self, at: int | None, text: str) -> None:
+        work = self._current
+        if work is None or not text.strip():
+            return
+        if completion_signal(text):  # H24 — 카드와 같은 결정적 완료 신호
+            self._complete(work, at, _completed_progress())
+        if work["pipeline"] is None:
+            return
+        current = _current_steps(text)
+        if current and (not work["steps"] or work["steps"][-1]["step"] != current[-1]):
+            title = (self._step_titles.get(work["pipeline"]) or {}).get(current[-1], "")
+            work["steps"].append({"at": at, "step": current[-1], "title": title})
+        steps = self._pipelines.get(work["pipeline"]) or []
+        if current and current[-1] in steps and _is_last_step(steps, steps.index(current[-1])):
+            # H25 — 마지막 Step 도달 = 완료 (카드와 같은 _step_progress 값으로 고정)
+            self._complete(work, at, _step_progress(work["pipeline"], steps, steps.index(current[-1])))
+
+    def items(self) -> list[dict]:
+        failed = [0] * len(self._works)
+        for task_id, index in self._task_origin.items():
+            if self._tasks[task_id]["state"] == "failed":
+                failed[index] += 1
+        items = []
+        for index, work in enumerate(self._works):
+            final_step = work["steps"][-1]["step"] if work["steps"] else None
+            result = _work_result(work, final_step, self._pipelines, index == len(self._works) - 1)
+            items.append({
+                "id": work["id"],
+                "title": work["title"],
+                "startedAt": work["startedAt"],
+                "endedAt": work["endedAt"],
+                "completedAt": work["completedAt"],
+                "requestCount": work["requestCount"],
+                "pipeline": work["pipeline"],
+                "runId": work["runId"],
+                "stepPath": [step["step"] for step in work["steps"]],
+                "finalStep": final_step,
+                "steps": work["steps"],
+                "progress": work["completionProgress"]
+                or _work_progress(result, work["pipeline"], final_step, self._pipelines),
+                "result": result,
+                "subagents": work["subagents"],
+                "backgroundShells": work["backgroundShells"],
+                "failedTasks": failed[index],
+            })
+        return items
+
+
+def split_work_items(
+    lines: Iterable[str],
+    *,
+    pipelines: dict[str, list[int]],
+    step_titles: dict[str, dict[int, str]] | None = None,
+) -> list[dict]:
+    """transcript JSONL 줄 → 작업 목록 (오래된 → 최신). 깨진 줄은 건너뛴다 (1회 순회)."""
+    splitter = _WorkSplitter(pipelines, step_titles)
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict):
+            splitter.feed(record)
+    return splitter.items()
+
+
+def work_summary(items: list[dict]) -> dict:
+    count = {result: 0 for result in WORK_RESULTS}
+    for item in items:
+        count[item["result"]] += 1
+    return {
+        "total": len(items),
+        "completed": count["completed"],
+        "inProgress": count["in_progress"],
+        "answered": count["answered"],
+        "interrupted": count["interrupted"],
+    }
+
+
+def _series_point(at: int, progress: dict, source: str, work_id: str | None) -> dict:
+    return {"at": at, "percent": progress["percent"], "basis": progress["basis"], "source": source, "workId": work_id}
+
+
+def progress_series(work_items: list[dict], observed: list[dict], pipelines: dict[str, list[int]]) -> list[dict]:
+    """진행률 추이 — transcript 작업별 Step 시점 진행률(+완료 100) · dashboard 관측 점, 시각 오름차순."""
+    points = []
+    for item in work_items:
+        for step in item["steps"]:
+            if step["at"] is not None:
+                progress = _work_progress("in_progress", item["pipeline"], step["step"], pipelines)
+                points.append(_series_point(step["at"], progress, "transcript", item["id"]))
+        # H21 — 완료 점은 완료 시각(completedAt) 고정, 값은 작업 progress(카드와 같은 판정). 후속 응답으로 옮기지 않는다.
+        # 마지막 Step 도달(H25)처럼 같은 시각·값의 Step 점이 이미 있으면 중복 점을 만들지 않는다.
+        if item["result"] == "completed" and item.get("completedAt") is not None:
+            completion = _series_point(item["completedAt"], item["progress"], "transcript", item["id"])
+            if completion not in points:
+                points.append(completion)
+    for point in observed:
+        if point.get("percent") is not None:
+            points.append(_series_point(point["at"], point, "dashboard", None))
+    return sorted(points, key=lambda point: point["at"])
+
+
+# ── 관측 히스토리 (순수) ────────────────────────────────────────────────
+
+
+def history_point(session: dict, now_ms: int) -> dict:
+    """세션 → 관측 점 1개. pipeline·step 은 체크리스트의 파이프라인과 current Step 번호."""
+    checklist = session.get("checklist") or {}
+    progress = session.get("progress") or {}
+    current = next((step.get("number") for step in checklist.get("steps") or [] if step.get("state") == "current"), None)
+    return {
+        "v": HISTORY_SCHEMA_VERSION,
+        "at": now_ms,
+        "sessionId": session.get("id"),
+        "name": session.get("name"),
+        "path": session.get("path"),
+        "agentType": session.get("agentType"),
+        "status": session.get("status"),
+        "percent": progress.get("percent"),
+        "basis": progress.get("basis"),
+        "pipeline": checklist.get("pipeline"),
+        "step": current,
+    }
+
+
+def history_changes(last_points: dict[str, dict], snapshot: dict, now_ms: int) -> list[dict]:
+    """추적 필드가 직전 점과 다른 세션(또는 첫 관측)만. 실패 스냅샷은 기록하지 않는다."""
+    if snapshot.get("error"):
+        return []
+    changes = []
+    for session in snapshot.get("sessions") or []:
+        point = history_point(session, now_ms)
+        previous = last_points.get(point["sessionId"])
+        if previous is None or any(previous.get(field) != point[field] for field in HISTORY_TRACKED_FIELDS):
+            changes.append(point)
+    return changes
+
+
+def _valid_history_point(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("v") == HISTORY_SCHEMA_VERSION
+        and isinstance(value.get("sessionId"), str)
+        and bool(value["sessionId"])
+        and isinstance(value.get("at"), int)
+        and not isinstance(value.get("at"), bool)
+    )
+
+
+def parse_history(lines: Iterable[str]) -> dict[str, list[dict]]:
+    """history.jsonl 줄 → 세션별 관측 점 (at 오름차순, 마지막 HISTORY_POINTS_PER_SESSION 개). 잘못된 줄은 건너뛴다."""
+    points: dict[str, list[dict]] = {}
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if _valid_history_point(value):
+            points.setdefault(value["sessionId"], []).append(value)
+    return {
+        session_id: sorted(session_points, key=lambda point: point["at"])[-HISTORY_POINTS_PER_SESSION:]
+        for session_id, session_points in points.items()
     }
 
 
@@ -897,12 +1500,23 @@ def _blockers(session: dict, tasks: list[dict]) -> list[dict]:
     return blockers
 
 
-def build_detail(session: dict, transcript: dict | None, *, now_ms: int) -> dict:
-    """세션 상세 = 메인/자식 에이전트 트리 · 타임라인 · 블로킹 사유.
+def build_detail(
+    session: dict,
+    transcript: dict | None,
+    *,
+    now_ms: int,
+    work_items: list[dict] | None = None,
+    observed: list[dict] | None = None,
+    pipelines: dict[str, list[int]] | None = None,
+    history_warnings: list[str] | None = None,
+) -> dict:
+    """세션 상세 = 메인/자식 에이전트 트리 · 타임라인 · 블로킹 사유 · 작업 히스토리 · 진행률 추이.
 
     now_ms 는 다른 순수 함수와 같은 주입 규약 — 경과 시간은 화면이 at 값으로 계산한다.
+    work_items = split_work_items 결과(transcript 없으면 빈 list), observed = 이 세션의 대시보드 관측 점.
     """
     tasks = transcript["tasks"] if transcript is not None else []
+    work_items = list(work_items or [])
     return {
         "session": session,
         "agents": {
@@ -917,6 +1531,10 @@ def build_detail(session: dict, transcript: dict | None, *, now_ms: int) -> dict
         "timeline": _timeline(transcript) if transcript is not None else [],
         "blockers": _blockers(session, tasks),
         "transcript": transcript is not None,
+        "workItems": work_items,
+        "workSummary": work_summary(work_items),
+        "progressSeries": progress_series(work_items, observed or [], pipelines or {}),
+        "historyWarnings": list(history_warnings or []),
     }
 
 
@@ -1003,11 +1621,13 @@ def collect(
     now_ms: int,
     warnings: list[str] | None = None,
     prompts: dict[str, str] | None = None,
+    catalog: dict | None = None,
 ) -> dict:
     """스킬 정의 → worktree ps → terminal list → 에이전트 터미널 tail 읽기 → build_snapshot.
 
     warnings = 수집 중 경고를 누적할 list (실패 시 호출자가 실패 JSON 에 싣는다).
     prompts = 세션 id(paneKey) → (agent prompt, lastAssistantMessage) 를 채울 dict (상세 페이지 transcript 탐색용).
+    catalog = {"pipelines", "stepTitles"} 를 채울 dict (serve 작업 히스토리 계산용).
     """
     warnings = [] if warnings is None else warnings
     markdowns = _skill_markdowns(skills_dir, warnings)
@@ -1024,6 +1644,7 @@ def collect(
             continue
         tail = (result.get("terminal") or {}).get("tail") or []
         tails[handle] = [str(line) for line in tail] if isinstance(tail, list) else str(tail).splitlines()
+    step_titles = _step_titles_from(markdowns)
     snapshot = build_snapshot(
         worktrees,
         terminals,
@@ -1031,8 +1652,10 @@ def collect(
         now_ms=now_ms,
         pipelines=pipelines,
         tail_errors=tail_errors,
-        step_titles=_step_titles_from(markdowns),
+        step_titles=step_titles,
     )
+    if catalog is not None:
+        catalog.update(pipelines=pipelines, stepTitles=step_titles)
     if prompts is not None:
         prompts.update(agent_prompts(worktrees))
     return {**snapshot, "warnings": [*warnings, *snapshot["warnings"]]}
@@ -1050,7 +1673,10 @@ def agent_prompts(worktrees: list[dict]) -> dict[str, tuple[str | None, str | No
 
 
 class _FileMemo:
-    """(경로, mtime, size) 가 같으면 직전 계산 결과를 재사용 — 대용량 transcript 반복 파싱 회피."""
+    """(경로, mtime, size, key) 가 같으면 직전 계산 결과를 재사용 — 대용량 transcript 반복 파싱 회피.
+
+    args 는 compute(path, *args) 에 넘기는 추가 입력, key 는 그 입력을 대표하는 해시 가능한 값.
+    """
 
     def __init__(self, compute, max_entries: int = 4096):
         self._compute = compute
@@ -1058,13 +1684,13 @@ class _FileMemo:
         self._lock = threading.Lock()
         self._entries: dict[str, tuple[tuple[int, int], object]] = {}
 
-    def get(self, path: str, stat: os.stat_result):
-        signature = (stat.st_mtime_ns, stat.st_size)
+    def get(self, path: str, stat: os.stat_result, *args, key=None):
+        signature = (stat.st_mtime_ns, stat.st_size, key)
         with self._lock:
             cached = self._entries.get(path)
         if cached is not None and cached[0] == signature:
             return cached[1]
-        value = self._compute(path)
+        value = self._compute(path, *args)
         with self._lock:
             if len(self._entries) >= self._max_entries:
                 self._entries.clear()
@@ -1073,12 +1699,12 @@ class _FileMemo:
 
 
 def _read_match_texts(path: str) -> tuple[str | None, str | None]:
-    """파일 안 (마지막 사용자 요청, 마지막 assistant 텍스트 블록) — user·assistant 줄만 JSON 파싱."""
+    """파일 안 (마지막 사용자 요청, 마지막 assistant 텍스트 블록) — user·assistant·queued 줄만 JSON 파싱."""
     last_request = None
     last_reply = None
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
-            if '"user"' not in line and '"assistant"' not in line:
+            if '"user"' not in line and '"assistant"' not in line and QUEUED_COMMAND_TYPE not in line:
                 continue
             try:
                 record = json.loads(line)
@@ -1086,7 +1712,7 @@ def _read_match_texts(path: str) -> tuple[str | None, str | None]:
                 continue
             if not isinstance(record, dict):
                 continue
-            if record.get("type") == "user":
+            if record.get("type") in ("user", "attachment"):
                 last_request = _user_request_text(record) or last_request
             elif record.get("type") == "assistant":
                 texts = [text for text in _content_texts(_record_content(record)) if text.strip()]
@@ -1100,7 +1726,13 @@ def _read_transcript(path: str) -> dict:
 
 
 _MATCH_TEXTS = _FileMemo(_read_match_texts)
+def _read_work_items(path: str, pipelines: dict[str, list[int]], step_titles: dict[str, dict[int, str]]) -> list[dict]:
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return split_work_items(handle, pipelines=pipelines, step_titles=step_titles)
+
+
 _TRANSCRIPTS = _FileMemo(_read_transcript, max_entries=64)
+_WORK_ITEMS = _FileMemo(_read_work_items, max_entries=64)
 
 
 def find_transcript(
@@ -1162,6 +1794,27 @@ def load_transcript(path: str) -> dict:
     return _TRANSCRIPTS.get(path, os.stat(path))
 
 
+def _catalog_key(catalog: dict) -> str:
+    return json.dumps([catalog.get("pipelines") or {}, catalog.get("stepTitles") or {}], sort_keys=True)
+
+
+def load_work_items(path: str, catalog: dict) -> list[dict]:
+    """작업 분할 결과 ((경로, mtime, size, 파이프라인 정의) 캐시). 읽기 실패는 OSError 로 올린다."""
+    pipelines, step_titles = catalog.get("pipelines") or {}, catalog.get("stepTitles") or {}
+    return _WORK_ITEMS.get(path, os.stat(path), pipelines, step_titles, key=_catalog_key(catalog))
+
+
+def resolve_transcript(
+    session: dict, match_keys: tuple[str | None, str | None], projects_root: str, *, sole_session: bool = False
+) -> str | None:
+    """세션 → transcript 경로 (R16·R21·R23·R29 매칭). 매칭 근거가 없으면 None, 읽기 실패는 OSError."""
+    prompt, last_message = match_keys
+    if not session.get("path") or not (prompt or last_message or sole_session):
+        return None
+    directory = transcript_dir(projects_root, session["path"])
+    return find_transcript(directory, prompt, last_message, sole_session=sole_session)
+
+
 def claude_projects_root(env: Mapping[str, str]) -> str:
     configured = (env.get("CLAUDE_PROJECTS_DIR") or "").strip()
     return configured or os.path.join(os.path.expanduser("~"), ".claude", "projects")
@@ -1171,37 +1824,279 @@ def now_millis() -> int:
     return int(time.time() * 1000)
 
 
+def history_path(env: Mapping[str, str]) -> str:
+    """관측 히스토리 파일 경로 — 하네스 설치 위치(__file__)와 무관하게 사용자 홈 기준."""
+    configured = (env.get("ORCA_DASHBOARD_HISTORY_DIR") or "").strip()
+    directory = configured or os.path.join(os.path.expanduser("~"), ".harness", "runs", "orca-dashboard")
+    return os.path.join(directory, HISTORY_FILE_NAME)
+
+
+class _UnlockError(OSError):
+    """공유 잠금 해제 실패 — 읽은 줄(lines)은 유효하다."""
+
+    def __init__(self, lines: list[str], cause: OSError):
+        super().__init__(str(cause))
+        self.lines = lines
+        self.cause = cause
+
+
+class HistoryStore:
+    """관측 히스토리 JSONL — 값이 바뀐 점만 append, 세션당 HISTORY_POINTS_PER_SESSION 개 메모리 사본.
+
+    실패는 예외 없이 경고 문자열로 돌려준다 (기록 실패가 수집·화면을 막지 않는다).
+    H15 — append 성공한 점만 메모리에 1회 반영한다. 쓰기 실패한 점은 반영하지 않아 다음 주기에 다시 시도한다.
+    압축은 append 와 별도 단계: 성공하면 메모리 = 압축 결과, 실패하면 경고만 남기고 이미 반영한 점은 재기록하지 않는다.
+    """
+
+    def __init__(self, path: str):
+        self._path = path
+        self._lock = threading.Lock()
+        self._points: dict[str, list[dict]] = {}
+        self._line_count = 0
+        self._load_warnings: list[str] = []
+        self._record_warnings: list[str] = []
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def load(self) -> list[str]:
+        """공유 잠금(LOCK_SH) 아래 읽기. 파일 없음 → [], 잠금·열기·읽기·해제의 모든 OSError → 읽기 실패 경고 (H18).
+
+        잠금을 못 잡으면 읽지 않는다(압축 중 파일을 섞어 읽지 않게). 해제 실패는 이미 읽은 내용을 반영하고 경고만 남긴다.
+        """
+        lines: list[str] | None = None
+        warnings: list[str] = []
+        try:
+            lines = self._read_shared()
+        except FileNotFoundError:
+            lines = None
+        except _UnlockError as error:
+            lines = error.lines
+            warnings = [f"history 읽기 실패 {self._path}: {error.cause}"]
+        except OSError as error:
+            warnings = [f"history 읽기 실패 {self._path}: {error}"]
+        with self._lock:
+            if lines is not None:
+                self._points = parse_history(lines)
+                self._line_count = len(lines)
+            self._load_warnings = warnings
+        return list(warnings)
+
+    def _read_shared(self) -> list[str]:
+        os.stat(self._path)  # 파일 없음 = FileNotFoundError(경고 없음) — 잠금 파일을 만들기 전에 판정
+        with open(self._path + ".lock", "a", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            try:
+                with open(self._path, encoding="utf-8", errors="replace") as handle:
+                    lines = handle.read().splitlines()
+            except BaseException:
+                with suppress(OSError):
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                raise
+            try:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            except OSError as error:
+                raise _UnlockError(lines, error) from error
+        return lines
+
+    def record(self, snapshot: dict, now_ms: int) -> list[str]:
+        with self._lock:
+            last_points = {session_id: points[-1] for session_id, points in self._points.items() if points}
+            changes = history_changes(last_points, snapshot, now_ms)
+            warnings = self._write(changes) if changes else []
+            self._record_warnings = warnings
+            return list(warnings)
+
+    def points(self, session_id: str) -> list[dict]:
+        with self._lock:
+            return [dict(point) for point in self._points.get(session_id, [])]
+
+    def warnings(self) -> list[str]:
+        """지속 경고 — 시작 시 읽기 실패(계속 노출) + 직전 기록 실패."""
+        with self._lock:
+            return [*self._load_warnings, *self._record_warnings]
+
+    def _write(self, changes: list[dict]) -> list[str]:
+        """잠금 파일 flock 아래 append → 메모리 반영 → (임계값 초과 시) 압축. 실패는 경고 목록.
+
+        H18 — 디렉토리 생성·잠금 파일 열기·flock 획득·해제·닫기의 모든 OSError 는 경고로 돌려주고 올리지 않는다.
+        획득 실패면 쓰지 않는다(메모리 미반영 → 다음 주기 재시도). 해제 실패는 이미 append 한 점을 유지하고 경고만 더한다.
+        """
+        directory = os.path.dirname(self._path)
+        try:
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(self._path + ".lock", "a", encoding="utf-8") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                warnings = self._write_locked(changes, directory or ".")
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                except OSError as error:
+                    warnings.append(f"history 기록 실패 {self._path}: {error}")
+                return warnings
+        except OSError as error:
+            return [f"history 기록 실패 {self._path}: {error}"]
+
+    def _write_locked(self, changes: list[dict], directory: str) -> list[str]:
+        """호출자가 LOCK_EX 를 잡은 상태. append 실패·압축 실패는 경고 목록 (예외 없음).
+
+        H32 — 잠금 안에서 파일의 영속 최신 점과 다시 비교해 변화분만 append 한다 (다른 writer 가 먼저 기록한
+        같은 상태를 중복 기록하지 않음). 메모리 사본도 영속 상태로 맞춘다.
+        """
+        try:
+            changes = self._unpersisted(changes)
+            self._append(changes)
+        except OSError as error:
+            return [f"history 기록 실패 {self._path}: {error}"]
+        self._remember(changes)
+        if self._line_count <= HISTORY_COMPACT_LINES:
+            return []
+        try:
+            self._compact(directory)
+        except OSError as error:
+            return [f"history 기록 실패 {self._path}: 압축 실패 — {error}"]
+        return []
+
+    def _unpersisted(self, changes: list[dict]) -> list[dict]:
+        """영속 파일의 세션별 마지막 점과 추적 필드가 다른 점만. 메모리 사본 = 영속 상태."""
+        try:
+            with open(self._path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except FileNotFoundError:
+            lines = []
+        persisted = parse_history(lines)
+        self._points = persisted
+        self._line_count = len(lines)
+        fresh = []
+        for point in changes:
+            previous = (persisted.get(point["sessionId"]) or [None])[-1]
+            if previous is None or any(previous.get(field) != point.get(field) for field in HISTORY_TRACKED_FIELDS):
+                fresh.append(point)
+        return fresh
+
+    def _append(self, changes: list[dict]) -> None:
+        """끝이 개행이 아니면(잘린 줄) 먼저 개행 후 append. 호출자가 flock 을 잡는다."""
+        if not changes:
+            return
+        with open(self._path, "a+b") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            broken_tail = False
+            if size:
+                handle.seek(size - 1)
+                broken_tail = handle.read(1) != b"\n"
+            payload = b"".join(json.dumps(point, ensure_ascii=False).encode("utf-8") + b"\n" for point in changes)
+            handle.write((b"\n" if broken_tail else b"") + payload)
+        self._line_count += len(changes)
+
+    def _remember(self, changes: list[dict]) -> None:
+        for point in changes:
+            session_points = self._points.setdefault(point["sessionId"], [])
+            session_points.append(point)
+            del session_points[:-HISTORY_POINTS_PER_SESSION]
+
+    def _compact(self, directory: str) -> None:
+        """세션별 상한만 남겨 임시 파일에 쓰고 os.replace (중간 상태가 남지 않는다)."""
+        with open(self._path, encoding="utf-8", errors="replace") as handle:
+            kept = parse_history(handle.read().splitlines())
+        ordered = sorted((point for points in kept.values() for point in points), key=lambda point: point["at"])
+        descriptor, temporary = tempfile.mkstemp(prefix=".history-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                for point in ordered:
+                    handle.write(json.dumps(point, ensure_ascii=False) + "\n")
+            os.replace(temporary, self._path)
+        except OSError:
+            with suppress(OSError):
+                os.unlink(temporary)
+            raise
+        self._points = kept
+        self._line_count = len(ordered)
+
+
 # ── serve ───────────────────────────────────────────────────────────────
 
 
 class SnapshotStore:
-    """직전 성공 스냅샷을 유지하고, 실패 시 error 만 덧씌운다."""
+    """직전 성공 스냅샷을 유지하고, 실패 시 error 만 덧씌운다.
 
-    def __init__(self, interval: float):
+    history 가 있으면 성공 refresh 마다 관측 변화를 기록하고 그 경고를 snapshot warnings 에 덧붙인다
+    (error 아님 — snapshot 교체를 막지 않는다). projects_root 가 있으면 transcript 연결 세션의 workSummary 를 채운다.
+    """
+
+    def __init__(self, interval: float, history: HistoryStore | None = None, projects_root: str | None = None):
         self._interval = interval
+        self._history = history
+        self._projects_root = projects_root
         self._lock = threading.Lock()
         self._snapshot = error_snapshot("아직 수집 전", now_millis())
         self._prompts: dict[str, tuple[str | None, str | None]] = {}
+        self._catalog: dict = {}
         self._last_success_at: int | None = None
+
+    @property
+    def history(self) -> HistoryStore | None:
+        return self._history
 
     def refresh(self, command: list[str]) -> None:
         """수집 1회. 어떤 예외든 error 로 노출하고 직전 성공 스냅샷을 유지한다."""
         now_ms = now_millis()
         prompts: dict[str, tuple[str | None, str | None]] = {}
+        catalog: dict = {}
         try:
-            snapshot = collect(command, SKILLS_DIR, now_ms, prompts=prompts)
+            snapshot = collect(command, SKILLS_DIR, now_ms, prompts=prompts, catalog=catalog)
+            self._fill_work_summaries(snapshot["sessions"], prompts, catalog)
         except Exception as error:  # noqa: BLE001 — 수집 스레드는 어떤 실패로도 죽지 않는다
             with self._lock:
                 self._snapshot = {**self._snapshot, "error": f"{type(error).__name__}: {error}"}
             return
+        if self._history is not None:
+            snapshot["warnings"] = [*snapshot["warnings"], *self._record_history(snapshot, now_ms)]
         with self._lock:
             self._snapshot = snapshot
             self._prompts = prompts
+            self._catalog = catalog
             self._last_success_at = now_ms
+
+    def _record_history(self, snapshot: dict, now_ms: int) -> list[str]:
+        """H18 최후 방어 — record 가 어떤 예외를 내도 snapshot 갱신·다음 주기 수집을 막지 않고 경고로 바꾼다.
+
+        정상 경로의 경고 = warnings() (시작 시 읽기 실패(지속) + 이번 기록 실패, record 반환값 포함).
+        """
+        history = self._history
+        try:
+            history.record(snapshot, now_ms)
+            return history.warnings()
+        except Exception as error:  # noqa: BLE001 — 기록 실패가 수집 스레드·서버 기동을 죽이지 않는다
+            return [f"history 기록 실패 {history.path}: {type(error).__name__}: {error}"]
+
+    def _fill_work_summaries(self, sessions: list[dict], prompts: dict, catalog: dict) -> None:
+        """transcript 를 연결할 수 있는 세션만 workSummary 계산 (매칭·분할 모두 파일 캐시). 실패 세션은 None 유지."""
+        if self._projects_root is None:
+            return
+        path_counts: dict[str | None, int] = {}
+        for session in sessions:
+            path_counts[session.get("path")] = path_counts.get(session.get("path"), 0) + 1
+        for session in sessions:
+            try:
+                path = resolve_transcript(
+                    session,
+                    prompts.get(session["id"], (None, None)),
+                    self._projects_root,
+                    sole_session=path_counts[session.get("path")] == 1,
+                )
+                if path is not None:
+                    session["workSummary"] = work_summary(load_work_items(path, catalog))
+            except (OSError, UnicodeDecodeError):
+                session["workSummary"] = None
 
     def payload(self) -> dict:
         with self._lock:
             return {**self._snapshot, "interval": self._interval, "lastSuccessAt": self._last_success_at}
+
+    def catalog(self) -> dict:
+        with self._lock:
+            return self._catalog
 
     def session(self, session_id: str) -> tuple[dict, tuple[str | None, str | None], bool] | None:
         """최신 스냅샷의 세션, transcript 매칭 키 (prompt, lastAssistantMessage), 같은 path 의 유일 세션 여부.
@@ -1224,19 +2119,27 @@ def session_detail(
     now_ms: int,
     *,
     sole_session: bool = False,
+    history: HistoryStore | None = None,
+    catalog: dict | None = None,
 ) -> dict:
-    """세션 상세 응답. transcript 를 찾지 못하면 transcript false, 읽기 실패는 transcriptError 로 노출."""
-    prompt, last_message = match_keys
-    if not session.get("path") or not (prompt or last_message or sole_session):
-        return build_detail(session, None, now_ms=now_ms)
+    """세션 상세 응답. transcript 를 찾지 못하면 transcript false, 읽기 실패는 transcriptError 로 노출.
+
+    관측 추이(history)는 transcript 유무와 무관하게 싣는다.
+    """
+    catalog = catalog or {}
+    extra = {
+        "observed": history.points(session["id"]) if history is not None else [],
+        "pipelines": catalog.get("pipelines") or {},
+        "history_warnings": history.warnings() if history is not None else [],
+    }
     try:
-        directory = transcript_dir(projects_root, session["path"])
-        path = find_transcript(directory, prompt, last_message, sole_session=sole_session)
+        path = resolve_transcript(session, match_keys, projects_root, sole_session=sole_session)
         transcript = load_transcript(path) if path is not None else None
+        work_items = load_work_items(path, catalog) if path is not None else []
     except (OSError, UnicodeDecodeError) as error:
         message = str(error) if isinstance(error, TranscriptReadError) else f"transcript 읽기 실패: {error}"
-        return {**build_detail(session, None, now_ms=now_ms), "transcriptError": message}
-    return build_detail(session, transcript, now_ms=now_ms)
+        return {**build_detail(session, None, now_ms=now_ms, **extra), "transcriptError": message}
+    return build_detail(session, transcript, now_ms=now_ms, work_items=work_items, **extra)
 
 
 def _poll_forever(store: SnapshotStore, command: list[str], interval: float) -> None:
@@ -1264,7 +2167,18 @@ def _handler_for(store: SnapshotStore, projects_root: str):
                 self._send_json(404, {"error": f"세션 없음: {session_id or '(id 미지정)'}"})
                 return
             session, match_keys, sole_session = found
-            self._send_json(200, session_detail(session, match_keys, projects_root, now_millis(), sole_session=sole_session))
+            self._send_json(
+                200,
+                session_detail(
+                    session,
+                    match_keys,
+                    projects_root,
+                    now_millis(),
+                    sole_session=sole_session,
+                    history=store.history,
+                    catalog=store.catalog(),
+                ),
+            )
 
         def _send_json(self, status: int, payload: dict) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1333,10 +2247,13 @@ def cmd_serve(args: list[str]) -> int:
         return usage()
     port, interval = parsed
     command = orca_command(os.environ)
-    store = SnapshotStore(interval)
+    projects_root = claude_projects_root(os.environ)
+    history = HistoryStore(history_path(os.environ))
+    history.load()  # 읽기 실패 경고는 history.warnings() 로 모든 snapshot 에 계속 노출된다
+    store = SnapshotStore(interval, history=history, projects_root=projects_root)
     store.refresh(command)
     threading.Thread(target=_poll_forever, args=(store, command, interval), daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(store, claude_projects_root(os.environ)))
+    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(store, projects_root))
     server.daemon_threads = True
     print(f"orca-dashboard: http://127.0.0.1:{port}/ (interval {interval}s)", file=sys.stderr, flush=True)
     try:
@@ -1388,6 +2305,11 @@ PAGE_HTML = r"""<!doctype html>
   --task-completed: #18794e; --task-completed-bg: #e2f5e9;
   --task-failed: #c4321f; --task-failed-bg: #fde8e6;
   --tl-prompt: #7a4fd0; --tl-step: #3366e0; --tl-start: #0e7c86;
+  --chart-line: #3366e0; --chart-observed: #c2570c; --chart-grid: #e7eaee;
+  --work-completed: #18794e; --work-completed-bg: #e2f5e9;
+  --work-running: #3366e0; --work-running-bg: #e7eefd;
+  --work-answered: #5b6471; --work-answered-bg: #eceef1;
+  --work-interrupted: #b42318; --work-interrupted-bg: #fde8e6;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -1410,6 +2332,11 @@ PAGE_HTML = r"""<!doctype html>
     --task-completed: #5fd394; --task-completed-bg: #0f2f1e;
     --task-failed: #ff8a80; --task-failed-bg: #3a1715;
     --tl-prompt: #b69cff; --tl-step: #7aa5ff; --tl-start: #5cc8d0;
+    --chart-line: #7aa5ff; --chart-observed: #ffb366; --chart-grid: #262c35;
+    --work-completed: #5fd394; --work-completed-bg: #0f2f1e;
+    --work-running: #7aa5ff; --work-running-bg: #1a2846;
+    --work-answered: #9ba5b2; --work-answered-bg: #252a32;
+    --work-interrupted: #ff8a80; --work-interrupted-bg: #3a1715;
   }
 }
 * { box-sizing: border-box; }
@@ -1585,8 +2512,76 @@ details.group li { overflow-wrap: anywhere; }
 .ev.ev-prompt .ev-text { font-weight: 600; }
 .ev-time { font-size: 12px; color: var(--faint); }
 
+/* 작업 요약 (카드) */
+.work-summary { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; color: var(--muted); }
+.work-summary .total { color: var(--text); font-weight: 600; }
+.work-summary .running { color: var(--work-running); font-weight: 600; }
+.work-summary .interrupted { color: var(--work-interrupted); font-weight: 600; }
+
+/* 작업 히스토리 */
+.work-counts { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); }
+.work-counts .result-completed { color: var(--work-completed); font-weight: 600; }
+.work-counts .result-in_progress { color: var(--work-running); font-weight: 600; }
+.work-counts .result-interrupted { color: var(--work-interrupted); font-weight: 600; }
+.works { display: flex; flex-direction: column; gap: 8px; }
+.works-past-label { margin: 8px 0 0; font-size: 12px; font-weight: 600; color: var(--faint); }
+.work { --tone: var(--work-answered); --tone-bg: var(--work-answered-bg); min-width: 0; border: 1px solid var(--border);
+  border-left: 3px solid var(--tone); border-radius: 12px; background: var(--surface-2); }
+.work.result-completed { --tone: var(--work-completed); --tone-bg: var(--work-completed-bg); }
+.work.result-in_progress { --tone: var(--work-running); --tone-bg: var(--work-running-bg); }
+.work.result-interrupted { --tone: var(--work-interrupted); --tone-bg: var(--work-interrupted-bg); }
+.work.latest { background: var(--surface); box-shadow: 0 0 0 3px var(--tone-bg); }
+.work.latest > .work-head, details.work > summary { padding: 12px 14px; }
+details.work > summary { display: block; list-style: none; cursor: pointer; border-radius: 12px; }
+details.work > summary::-webkit-details-marker { display: none; }
+details.work > summary:hover { background: var(--surface); }
+details.work[open] > summary { border-bottom: 1px dashed var(--border); border-radius: 12px 12px 0 0; }
+.work-head { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.work-icon { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; font-size: 13px; font-weight: 700;
+  background: var(--tone-bg); color: var(--tone); }
+.work.result-answered .work-icon { font-size: 20px; line-height: 1; }
+.work-main { min-width: 0; }
+.work-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.work.latest .work-title { font-size: 15px; }
+.work-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.work-result { flex: none; border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 700; white-space: nowrap;
+  background: var(--tone-bg); color: var(--tone); }
+.work-body { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 12px 54px; }
+details.work > .work-body { padding-top: 10px; }
+.work-progress { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; font-size: 12px; overflow-wrap: anywhere; }
+.work-progress .value { font-weight: 600; }
+.work-bar { height: 4px; border-radius: 999px; background: var(--track); overflow: hidden; }
+.work-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--tone); }
+.work-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.work-step { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--step-pending-bg); color: var(--muted); overflow-wrap: anywhere; }
+.work-step.last { background: var(--tone-bg); color: var(--tone); font-weight: 700; }
+.work-arrow { font-size: 11px; color: var(--faint); }
+.work-tools { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.work-tools .failed { color: var(--work-interrupted); font-weight: 600; }
+
+/* 진행률 추이 */
+.trend { display: block; width: 100%; height: auto; overflow: visible; }
+.trend .grid-line { stroke: var(--chart-grid); stroke-width: 1; }
+.trend .axis-line { stroke: var(--border-strong); stroke-width: 1; }
+.trend .axis-label { fill: var(--faint); font-size: 11px; }
+.trend .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.trend .series.transcript { stroke: var(--chart-line); }
+.trend .series.dashboard { stroke: var(--chart-observed); stroke-dasharray: 5 4; }
+.trend .point { stroke-width: 2; }
+.trend .point.transcript { fill: var(--surface); stroke: var(--chart-line); }
+.trend .point.dashboard { fill: var(--chart-observed); stroke: var(--surface); stroke-width: 1; }
+.trend .point.done { fill: var(--work-completed); stroke: var(--surface); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; width: 20px; border-top: 2px solid var(--chart-line); }
+.swatch.dashboard { border-top: 2px dashed var(--chart-observed); }
+.swatch.done { width: 8px; height: 8px; border: 0; border-radius: 50%; background: var(--work-completed); }
+
 @media (max-width: 720px) {
   body { padding-top: 16px; }
+  .work-head { grid-template-columns: 30px minmax(0, 1fr); }
+  .work-result { grid-column: 2; justify-self: start; }
+  .work-body { padding-left: 14px; }
   .detail-head { grid-template-columns: minmax(0, 1fr); justify-items: start; }
   .stepper { flex-direction: column; }
   .step { flex-direction: row; align-items: center; text-align: left; gap: 10px; padding: 0 0 14px; }
@@ -1633,6 +2628,8 @@ const STEP_SYMBOL = {done: "✔", current: "▶", pending: "○"};
 const STEP_STATE_LABEL = {done: "완료", current: "진행 중", pending: "남음"};
 const TASK_STATE_LABEL = {running: "실행 중", completed: "완료", failed: "실패", idle: "대기"};
 const EVENT_SYMBOL = {prompt: "❝", step: "⚑", task_start: "▸", task_end: "✔"};
+const WORK_SYMBOL = {completed: "✔", in_progress: "▶", answered: "◦", interrupted: "✕"};
+const WORK_LABEL = {completed: "완료", in_progress: "진행 중", answered: "응답 종료", interrupted: "중단"};
 const ENDED_CHILD_LIMIT = 20;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -1646,6 +2643,8 @@ let detailError = null;
 let detailMissing = null;
 let detailRequest = 0;
 let openedFromList = false;
+/* H16 — 과거 작업 <details> 를 "세션 id · 작업 id" 로 기억해 재렌더(폴링) 뒤에도 펼침 상태를 복원한다 */
+let workDetailNodes = new Map();
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -1789,6 +2788,7 @@ function card(session) {
   else if (session.progress && session.progress.basis && session.progress.percent !== null) {
     node.appendChild(el("div", "meta", session.progress.basis));
   }
+  if (session.workSummary) node.appendChild(workSummaryLine(session.workSummary));
   if (session.reason && (ATTENTION.has(session.status) || session.reason !== "작업 중")) {
     node.appendChild(el("div", "reason " + session.status, session.reason));
   }
@@ -2030,6 +3030,203 @@ function timelinePanel(payload) {
   return section;
 }
 
+/* ── 작업 히스토리 · 진행률 추이 ── */
+
+/* 작업 히스토리·추이는 로케일 표기("3시 2분 24초") 대신 짧은 HH:MM 을 쓴다 */
+function hm(ms) {
+  const date = new Date(ms);
+  return String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
+}
+
+function shortStamp(ms) {
+  const date = new Date(ms);
+  return (date.getMonth() + 1) + "/" + date.getDate() + " " + hm(ms);
+}
+
+function workSummaryLine(summary) {
+  const line = el("div", "work-summary");
+  line.appendChild(el("span", "total", "작업 " + summary.total + " · 완료 " + summary.completed));
+  if (summary.inProgress) line.appendChild(el("span", "running", WORK_LABEL.in_progress + " " + summary.inProgress));
+  if (summary.interrupted) line.appendChild(el("span", "interrupted", WORK_LABEL.interrupted + " " + summary.interrupted));
+  return line;
+}
+
+function workTimeRange(item) {
+  if (!item.startedAt) return null;
+  if (!item.endedAt || item.endedAt === item.startedAt) return shortStamp(item.startedAt);
+  const sameDay = new Date(item.startedAt).toDateString() === new Date(item.endedAt).toDateString();
+  return shortStamp(item.startedAt) + " → " + (sameDay ? hm(item.endedAt) : shortStamp(item.endedAt)) +
+    " (" + span(item.endedAt - item.startedAt) + ")";
+}
+
+function workHead(item) {
+  const head = el("div", "work-head");
+  head.appendChild(el("span", "work-icon", WORK_SYMBOL[item.result] || "•"));
+  const main = el("div", "work-main");
+  main.appendChild(el("span", "work-title", item.title || "(제목 없음)"));
+  const meta = [item.pipeline ? "/" + item.pipeline : null, "요청 " + item.requestCount, workTimeRange(item)];
+  main.appendChild(el("div", "work-meta", meta.filter(Boolean).join(" · ")));
+  head.appendChild(main);
+  head.appendChild(el("span", "work-result", WORK_LABEL[item.result] || item.result));
+  return head;
+}
+
+function workBody(item) {
+  const body = el("div", "work-body");
+  const progress = item.progress || {};
+  const known = progress.percent !== null && progress.percent !== undefined;
+  const box = el("div", "work-progress");
+  box.appendChild(el("span", "value", known
+    ? progress.percent + "%" + (progress.basis ? " — " + progress.basis : "")
+    : "진행률 산정 불가"));
+  if (known) {
+    const bar = el("div", "work-bar");
+    const fill = el("span");
+    fill.style.width = Math.min(100, Math.max(0, progress.percent)) + "%";
+    bar.appendChild(fill);
+    box.appendChild(bar);
+  }
+  body.appendChild(box);
+  if (item.steps && item.steps.length) {
+    const path = el("ol", "work-steps");
+    path.setAttribute("aria-label", "Step 경로");
+    item.steps.forEach((step, index) => {
+      if (index > 0) path.appendChild(el("li", "work-arrow", "→"));
+      const chip = el("li", "work-step" + (index === item.steps.length - 1 ? " last" : ""),
+        "Step " + step.step + (step.title ? " " + step.title : ""));
+      if (step.at) chip.setAttribute("title", stamp(step.at));
+      path.appendChild(chip);
+    });
+    body.appendChild(path);
+  } else if (item.pipeline) {
+    body.appendChild(el("div", "work-tools", "Step 기록 없음"));
+  }
+  const tools = el("div", "work-tools");
+  tools.appendChild(document.createTextNode("서브에이전트 " + item.subagents + " · 셸 " + item.backgroundShells));
+  if (item.failedTasks) tools.appendChild(el("span", "failed", " · 실패 " + item.failedTasks));
+  if (item.runId) tools.appendChild(document.createTextNode(" · " + item.runId));
+  body.appendChild(tools);
+  return body;
+}
+
+function workHistoryPanel(payload) {
+  const items = payload.workItems || [];
+  const summary = payload.workSummary || {};
+  const counts = el("div", "work-counts");
+  for (const [result, key] of [["completed", "completed"], ["in_progress", "inProgress"], ["answered", "answered"], ["interrupted", "interrupted"]]) {
+    if (summary[key]) counts.appendChild(el("span", "result-" + result, WORK_LABEL[result] + " " + summary[key]));
+  }
+  const section = panel("작업 히스토리" + (items.length ? " · " + items.length + "개" : ""), items.length ? counts : null);
+  if (!items.length) {
+    section.appendChild(el("div", "note", payload.transcript
+      ? "작업 기록 없음"
+      : "작업 기록 없음 — transcript 가 연결되지 않은 세션은 관측 추이만 표시합니다"));
+    return section;
+  }
+  const list = el("div", "works");
+  const latestItem = items[items.length - 1];
+  const latestNode = el("article", "work latest result-" + latestItem.result);
+  latestNode.setAttribute("aria-current", "true");
+  latestNode.appendChild(workHead(latestItem));
+  latestNode.appendChild(workBody(latestItem));
+  list.appendChild(latestNode);
+  const past = items.slice(0, -1).reverse();
+  if (past.length) list.appendChild(el("div", "works-past-label", "이전 작업 " + past.length + "개"));
+  const sessionId = payload.session && payload.session.id;
+  const previousNodes = workDetailNodes;
+  workDetailNodes = new Map();
+  for (const item of past) {
+    const node = el("details", "work result-" + item.result);
+    const key = sessionId + "\u0000" + item.id;
+    const previous = previousNodes.get(key);
+    if (previous && previous.open) node.open = true;
+    workDetailNodes.set(key, node);
+    const summaryNode = el("summary");
+    summaryNode.appendChild(workHead(item));
+    node.appendChild(summaryNode);
+    node.appendChild(workBody(item));
+    list.appendChild(node);
+  }
+  section.appendChild(list);
+  return section;
+}
+
+/* 추이 선분: transcript 는 workId 별, dashboard 는 한 계열. percent null 은 선을 끊는다 */
+function trendSegments(points) {
+  const open = new Map();
+  const segments = [];
+  for (const point of points) {
+    const key = point.source === "dashboard" ? "dashboard" : "work:" + point.workId;
+    if (point.percent === null || point.percent === undefined) { open.delete(key); continue; }
+    let segment = open.get(key);
+    if (!segment) { segment = {source: point.source === "dashboard" ? "dashboard" : "transcript", points: []}; open.set(key, segment); segments.push(segment); }
+    segment.points.push(point);
+  }
+  return segments;
+}
+
+function trendPanel(payload) {
+  const points = (payload.progressSeries || []).filter((point) => point.at !== null && point.at !== undefined);
+  const valid = points.filter((point) => point.percent !== null && point.percent !== undefined);
+  const section = panel("진행률 추이", el("span", "meta", "점 " + valid.length + "개"));
+  if (valid.length < 2) {
+    section.appendChild(el("div", "note", "추이 기록 부족 — 진행률 근거가 있는 점이 2개 이상 쌓이면 그래프를 표시합니다"));
+    return section;
+  }
+  const host = document.getElementById("detail-body");
+  const width = Math.round(Math.max(300, Math.min(1240, ((host && host.clientWidth) || 680) - 38)));
+  const height = 220;
+  const pad = {left: 40, right: 14, top: 12, bottom: 28};
+  const first = valid[0].at;
+  const last = valid[valid.length - 1].at;
+  const spanMs = Math.max(1, last - first);
+  const x = (at) => last === first ? (pad.left + width - pad.right) / 2 : pad.left + (at - first) / spanMs * (width - pad.left - pad.right);
+  const y = (percent) => pad.top + (100 - Math.min(100, Math.max(0, percent))) / 100 * (height - pad.top - pad.bottom);
+  const root = svg("svg", {class: "trend", viewBox: "0 0 " + width + " " + height, role: "img",
+    "aria-label": "진행률 추이 — 점 " + valid.length + "개, " + shortStamp(first) + "부터 " + shortStamp(last) + "까지"});
+  for (const tick of [0, 25, 50, 75, 100]) {
+    root.appendChild(svg("line", {class: tick === 0 ? "axis-line" : "grid-line", x1: pad.left, x2: width - pad.right, y1: y(tick), y2: y(tick)}));
+    const label = svg("text", {class: "axis-label", x: pad.left - 8, y: y(tick), "text-anchor": "end", "dominant-baseline": "central"});
+    label.textContent = tick + "%";
+    root.appendChild(label);
+  }
+  const ticks = last === first ? [first] : [first, first + spanMs / 2, last];
+  ticks.forEach((at, index) => {
+    const anchor = ticks.length === 1 ? "middle" : index === 0 ? "start" : index === ticks.length - 1 ? "end" : "middle";
+    const label = svg("text", {class: "axis-label", x: x(at), y: height - 8, "text-anchor": anchor});
+    label.textContent = new Date(first).toDateString() === new Date(last).toDateString() ? hm(at) : shortStamp(at);
+    root.appendChild(label);
+  });
+  const segments = trendSegments(points);
+  for (const segment of segments) {
+    if (segment.points.length < 2) continue;
+    root.appendChild(svg("polyline", {class: "series " + segment.source,
+      points: segment.points.map((point) => x(point.at).toFixed(1) + "," + y(point.percent).toFixed(1)).join(" ")}));
+  }
+  for (const segment of segments) {
+    for (const point of segment.points) {
+      const done = segment.source === "transcript" && point.percent >= 100;
+      const dot = svg("circle", {class: "point " + segment.source + (done ? " done" : ""), cx: x(point.at).toFixed(1),
+        cy: y(point.percent).toFixed(1), r: segment.source === "dashboard" ? 2.5 : 3.5});
+      const title = svg("title");
+      title.textContent = stamp(point.at) + " · " + point.percent + "% · " + (point.basis || "") +
+        (segment.source === "dashboard" ? " (대시보드 관측)" : "");
+      dot.appendChild(title);
+      root.appendChild(dot);
+    }
+  }
+  section.appendChild(root);
+  const legend = el("div", "legend");
+  for (const [className, label] of [["", "transcript 작업별 진행률"], ["dashboard", "dashboard 관측"], ["done", "작업 완료"]]) {
+    const item = el("span", "legend-item");
+    item.appendChild(el("span", "swatch" + (className ? " " + className : "")));
+    item.appendChild(document.createTextNode(label));
+    legend.appendChild(item);
+  }
+  section.appendChild(legend);
+  return section;
+}
+
 function renderDetail() {
   const root = document.getElementById("detail-body");
   if (detailMissing) {
@@ -2045,6 +3242,10 @@ function renderDetail() {
   const steps = stepperPanel(detail.session.checklist);
   steps.style.marginTop = "16px";
   parts.push(steps);
+  for (const section of [workHistoryPanel(detail), trendPanel(detail)]) {
+    section.style.marginTop = "16px";
+    parts.push(section);
+  }
   const grid = el("div", "detail-grid");
   grid.appendChild(agentTreePanel(detail));
   grid.appendChild(timelinePanel(detail));
